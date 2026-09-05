@@ -22,11 +22,21 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 
-# Список ключевых слов для отслеживания (в нижнем регистре)
-KEYWORDS = ["алерт", "тревога", "срочно", "внимание", "skynex"]
+# Список ключевых фраз для отслеживания (в нижнем регистре)
+KEYWORDS = [
+    "загроза балістики",
+    "київ — спуск балістики",
+    "київ - спуск балістики",
+    "нивки",
+    "нивок"
+]
 
-# Список отслеживаемых каналов (username или ID)
-TARGET_CHANNELS = ["@dtek_kem"]
+# Список отслеживаемых каналов
+TARGET_CHANNELS = [
+    "@war_monitor",
+    "@kievreal1",
+    "@truexanewsua"
+]
 
 client = TelegramClient('user_session', API_ID, API_HASH)
 
