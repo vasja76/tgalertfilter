@@ -26,7 +26,6 @@ MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 KEYWORDS = [
     "загроза балістики",
     "київ — спуск балістики",
-    "київ - спуск балістики",
     "нивки",
     "нивок"
 ]
@@ -35,7 +34,8 @@ KEYWORDS = [
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
-    "@truexanewsua"
+    "@truexanewsua",
+    "@tgalertfilter"
 ]
 
 client = TelegramClient('user_session', API_ID, API_HASH)
