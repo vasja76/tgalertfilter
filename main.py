@@ -36,7 +36,14 @@ TARGET_CHANNELS = [
     "@tgalertfilter"
 ]
 
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+client = TelegramClient(
+    StringSession(SESSION_STRING), 
+    API_ID, 
+    API_HASH,
+    connection_retries=5,     # Количество попыток переподключения
+    retry_delay=3,            # Задержка между попытками в секундах
+    auto_reconnect=True       # Автоматическое переподключение
+)
 
 def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
