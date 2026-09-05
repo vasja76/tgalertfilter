@@ -14,7 +14,8 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    # use_reloader=False предотвращает дублирование процессов
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
@@ -48,7 +49,7 @@ def send_telegram_alert(text):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
+        print(f"Ошибка отправки: {e}", flush=True)
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
@@ -60,10 +61,15 @@ async def handle_new_message(event):
         send_telegram_alert(alert_msg)
 
 async def start_telethon():
+    print("Запуск Telethon клиента...", flush=True)
     await client.start()
-    print("Telethon пользователь запущен и прослушивает ВСЕ каналы...")
+    print("Telethon успешно запущен и прослушивает каналы!", flush=True)
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Flask запускается в фоновом потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Telethon запускается в основном потоке
     asyncio.run(start_telethon())
