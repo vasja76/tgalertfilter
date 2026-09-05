@@ -42,8 +42,7 @@ def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": MY_TELEGRAM_ID,
-        "text": text,
-        "parse_mode": "HTML"
+        "text": text
     }
     try:
         requests.post(url, json=payload, timeout=10)
@@ -57,12 +56,12 @@ async def handle_new_message(event):
     
     if any(keyword in text_lower for keyword in KEYWORDS):
         chat = await event.get_chat()
-        channel_title = getattr(chat, 'title', 'Канал')
-        channel_username = f"@{chat.username}" if getattr(chat, 'username', None) else ""
+        username = getattr(chat, 'username', None)
         
-        source_info = f"<b>📢 {channel_title}</b> ({channel_username})" if channel_username else f"<b>📢 {channel_title}</b>"
-        alert_msg = f"{source_info}\n\n{message_text}"
+        # Если есть юзернейм — используем его, если нет — короткое имя
+        channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
         
+        alert_msg = f">>{channel_id}\n{message_text}"
         send_telegram_alert(alert_msg)
 
 async def start_telethon():
