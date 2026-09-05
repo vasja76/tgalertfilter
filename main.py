@@ -61,5 +61,4 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     
     # Запуск Telethon
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_telethon())
+    asyncio.run(start_telethon())
