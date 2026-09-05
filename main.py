@@ -72,3 +72,4 @@ if __name__ == "__main__":
     
     # Запуск Telethon
     asyncio.run(start_telethon())
+    
