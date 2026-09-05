@@ -3,9 +3,9 @@ import os
 import threading
 from flask import Flask
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 import requests
 
-# Инициализация Flask для поддержки активности (Render + cron-job)
 app = Flask(__name__)
 
 @app.route('/')
@@ -16,13 +16,12 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# Данные авторизации из переменных окружения
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
+SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# Список ключевых фраз для отслеживания (в нижнем регистре)
 KEYWORDS = [
     "загроза балістики",
     "київ — спуск балістики",
@@ -30,7 +29,6 @@ KEYWORDS = [
     "нивок"
 ]
 
-# Список отслеживаемых каналов
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
@@ -38,7 +36,7 @@ TARGET_CHANNELS = [
     "@tgalertfilter"
 ]
 
-client = TelegramClient('user_session', API_ID, API_HASH)
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -50,7 +48,7 @@ def send_telegram_alert(text):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+        print(f"Ошибка отправки: {e}")
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
@@ -62,14 +60,10 @@ async def handle_new_message(event):
         send_telegram_alert(alert_msg)
 
 async def start_telethon():
-    await client.start(bot_token=BOT_TOKEN)
-    print("Telethon клиент запущен и отслеживает каналы...")
+    await client.start()
+    print("Telethon пользователь запущен и прослушивает ВСЕ каналы...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    # Запуск Flask в отдельном потоке
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Запуск Telethon
     asyncio.run(start_telethon())
-    
