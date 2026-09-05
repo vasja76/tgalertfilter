@@ -52,7 +52,7 @@ async def handle_new_message(event):
         send_telegram_alert(alert_msg)
 
 async def start_telethon():
-    await client.start()
+    await client.start(bot_token=BOT_TOKEN)
     print("Telethon клиент запущен и отслеживает каналы...")
     await client.run_until_disconnected()
 
