@@ -14,7 +14,6 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    # use_reloader=False предотвращает дублирование процессов
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 API_ID = int(os.environ.get("API_ID"))
@@ -57,7 +56,13 @@ async def handle_new_message(event):
     text_lower = message_text.lower()
     
     if any(keyword in text_lower for keyword in KEYWORDS):
-        alert_msg = f"<b>🚨 Найдено совпадение!</b>\n\n{message_text}"
+        chat = await event.get_chat()
+        channel_title = getattr(chat, 'title', 'Канал')
+        channel_username = f"@{chat.username}" if getattr(chat, 'username', None) else ""
+        
+        source_info = f"<b>📢 {channel_title}</b> ({channel_username})" if channel_username else f"<b>📢 {channel_title}</b>"
+        alert_msg = f"{source_info}\n\n{message_text}"
+        
         send_telegram_alert(alert_msg)
 
 async def start_telethon():
@@ -67,9 +72,5 @@ async def start_telethon():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    # Flask запускается в фоновом потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Telethon запускается в основном потоке
+    threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(start_telethon())
