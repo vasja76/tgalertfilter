@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import threading
 from datetime import datetime, timedelta
 from flask import Flask
@@ -23,13 +24,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-KEYWORDS = [
-    "загроза балістики",
-    "київ — спуск балістики",
-    "нивки",
-    "нивок"
-]
-
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
@@ -47,6 +41,30 @@ client = TelegramClient(
 )
 
 HEARTBEAT_MESSAGE_ID = None
+
+def normalize_text(text):
+    return re.sub(r'[^\w\s]', ' ', text.lower())
+
+def is_alert_triggered(text_raw):
+    text = normalize_text(text_raw)
+    words = set(text.split())
+    
+    if "нивки" in words or "нивок" in words:
+        return True
+
+    if "загроза" in words and "балістики" in words:
+        return True
+        
+    if "київ" in words and "спуск" in words and "балістики" in words:
+        return True
+
+    if ("київ" in words or "києва" in words or "києву" in words) and any(w.startswith("циркон") for w in words):
+        return True
+
+    if ("київ" in words or "києва" in words or "києву" in words) and "кр" in words:
+        return True
+
+    return False
 
 def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -101,9 +119,8 @@ async def heartbeat_loop():
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
     message_text = event.raw_text
-    text_lower = message_text.lower()
     
-    if any(keyword in text_lower for keyword in KEYWORDS):
+    if is_alert_triggered(message_text):
         chat = await event.get_chat()
         username = getattr(chat, 'username', None)
         channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
