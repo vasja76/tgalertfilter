@@ -80,7 +80,7 @@ def send_telegram_alert(text):
 def update_heartbeat(tick_count):
     global HEARTBEAT_MESSAGE_ID
     now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
-    text = f"PULSE OK {now_kyiv} #{tick_count}"
+    text = f"🟢 {now_kyiv}"
     
     if HEARTBEAT_MESSAGE_ID is None:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
