@@ -27,8 +27,8 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
-    "@truexanewsua",
-    "@tgalertfilter"
+    "@truexanewsua"
+   # "@tgalertfilter"
 ]
 
 client = TelegramClient(
