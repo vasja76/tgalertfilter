@@ -28,7 +28,7 @@ TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
     "@truexanewsua"
-   # "@tgalertfilter"
+    # "@tgalertfilter"
 ]
 
 client = TelegramClient(
@@ -66,16 +66,17 @@ def is_alert_triggered(text_raw):
 
     return False
 
-def send_telegram_alert(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+def forward_telegram_message(from_chat_id, message_id):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
     payload = {
         "chat_id": MY_TELEGRAM_ID,
-        "text": text
+        "from_chat_id": from_chat_id,
+        "message_id": message_id
     }
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Send err: {e}", flush=True)
+        print(f"Forward err: {e}", flush=True)
 
 def update_heartbeat(tick_count):
     global HEARTBEAT_MESSAGE_ID
@@ -121,12 +122,7 @@ async def handle_new_message(event):
     message_text = event.raw_text
     
     if is_alert_triggered(message_text):
-        chat = await event.get_chat()
-        username = getattr(chat, 'username', None)
-        channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
-        
-        alert_msg = f">>{channel_id}\n{message_text}"
-        send_telegram_alert(alert_msg)
+        forward_telegram_message(event.chat_id, event.id)
 
 async def start_telethon():
     print("Запуск Telethon...", flush=True)
