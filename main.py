@@ -87,8 +87,7 @@ def update_heartbeat(tick_count):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": MY_TELEGRAM_ID,
-            "text": text,
-            "disable_notification": True
+            "text": text
         }
         try:
             res = requests.post(url, json=payload, timeout=10).json()
