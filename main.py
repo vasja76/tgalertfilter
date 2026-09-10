@@ -117,12 +117,19 @@ async def heartbeat_loop():
         update_heartbeat(tick)
         await asyncio.sleep(600)
 
-@client.on(events.NewMessage(chats=TARGET_CHANNELS))
-async def handle_new_message(event):
+async def process_message(event):
     message_text = event.raw_text
     
     if is_alert_triggered(message_text):
         forward_telegram_message(event.chat_id, event.id)
+
+@client.on(events.NewMessage(chats=TARGET_CHANNELS))
+async def handle_new_message(event):
+    await process_message(event)
+
+@client.on(events.MessageEdited(chats=TARGET_CHANNELS))
+async def handle_edited_message(event):
+    await process_message(event)
 
 async def start_telethon():
     print("Запуск Telethon...", flush=True)
