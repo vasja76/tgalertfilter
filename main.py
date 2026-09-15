@@ -97,7 +97,7 @@ def update_heartbeat(tick_count):
         payload = {
             "chat_id": MY_TELEGRAM_ID,
             "text": text,
-            "disable_notification": True  # Первый пульс отправляется без звука
+            "disable_notification": True  # Принудительно отправляем новый пульс без звука
         }
         try:
             res = requests.post(url, json=payload, timeout=10).json()
