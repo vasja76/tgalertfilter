@@ -43,25 +43,34 @@ client = TelegramClient(
 HEARTBEAT_MESSAGE_ID = None
 
 def normalize_text(text):
+    if not text:
+        return ""
     return re.sub(r'[^\w\s]', ' ', text.lower())
 
 def is_alert_triggered(text_raw):
+    if not text_raw:
+        return False
+        
     text = normalize_text(text_raw)
-    words = set(text.split())
     
-    if "нивки" in words or "нивок" in words:
+    # 1. Проверка локации Нивки (учитываем любые окончания)
+    if any(word in text for word in ["нивки", "нивок", "нивкам", "нивках"]):
         return True
 
-    if "загроза" in words and "балістики" in words:
+    # 2. Угроза баллистики
+    if "загроза" in text and "баліст" in text:
         return True
         
-    if "київ" in words and "спуск" in words and "балістики" in words:
+    # 3. Киев + спуск + баллистика
+    if ("київ" in text or "києв" in text) and "спуск" in text and "баліст" in text:
         return True
 
-    if ("київ" in words or "києва" in words or "києву" in words) and any(w.startswith("циркон") for w in words):
+    # 4. Киев + Циркон
+    if ("київ" in text or "києв" in text) and "циркон" in text:
         return True
 
-    if ("київ" in words or "києва" in words or "києву" in words) and "кр" in words:
+    # 5. Киев + Крылатые ракеты (КР)
+    if ("київ" in text or "києв" in text) and (" кр " in f" {text} " or "кр!" in text_raw.lower() or "кр." in text_raw.lower()):
         return True
 
     return False
@@ -87,7 +96,8 @@ def update_heartbeat(tick_count):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": MY_TELEGRAM_ID,
-            "text": text
+            "text": text,
+            "disable_notification": True  # Первый пульс отправляется без звука
         }
         try:
             res = requests.post(url, json=payload, timeout=10).json()
@@ -117,7 +127,7 @@ async def heartbeat_loop():
         await asyncio.sleep(600)
 
 async def process_message(event):
-    message_text = event.raw_text
+    message_text = event.message.message if event.message else event.raw_text
     
     if is_alert_triggered(message_text):
         forward_telegram_message(event.chat_id, event.id)
