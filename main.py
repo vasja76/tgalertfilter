@@ -20,18 +20,23 @@ def run_flask():
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
+
+# Приводим к int, если передали ID числом, иначе оставляем строкой (если юзернейм)
+raw_my_id = os.environ.get("MY_TELEGRAM_ID", "")
+try:
+    MY_TELEGRAM_ID = int(raw_my_id)
+except ValueError:
+    MY_TELEGRAM_ID = raw_my_id
+
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
-    "@truexanewsua"
-    # "@tgalertfilter"
+    "@truexanewsua",
+    "@tgalertfilter"
 ]
 
-# Ключевые слова и подстроки (в нижнем регистре)
-# Используем короткие корни слов, чтобы ловить любые окончания
 KEYWORDS = [
     "нивк",            # нивки, нивок, нивкам, нивках
     "баліст",          # балістика, балістична, балістику
@@ -110,7 +115,6 @@ def is_alert_triggered(text_raw):
         
     text_lower = text_raw.lower()
     
-    # Прямая проверка на наличие ключевых фраз/корней
     for kw in KEYWORDS:
         if kw in text_lower:
             return True
@@ -118,6 +122,14 @@ def is_alert_triggered(text_raw):
     return False
 
 async def process_message(event):
+    chat = await event.get_chat()
+    chat_username = f"@{chat.username}" if getattr(chat, 'username', None) else None
+
+    # Надежная защита от кольца пересылок (сравниваем и ID, и Username)
+    target_str = str(MY_TELEGRAM_ID).lower()
+    if str(event.chat_id) == target_str or (chat_username and chat_username.lower() == target_str):
+        return
+
     message_text = event.message.message if event.message else event.raw_text
     
     if is_alert_triggered(message_text):
