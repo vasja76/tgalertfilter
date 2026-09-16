@@ -21,7 +21,6 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Приводим к int, если передали ID числом, иначе оставляем строкой (если юзернейм)
 raw_my_id = os.environ.get("MY_TELEGRAM_ID", "")
 try:
     MY_TELEGRAM_ID = int(raw_my_id)
@@ -71,6 +70,17 @@ def forward_telegram_message(from_chat_id, message_id):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Forward err: {e}", flush=True)
+
+def send_telegram_reply(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": MY_TELEGRAM_ID,
+        "text": text
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Reply err: {e}", flush=True)
 
 def update_heartbeat():
     global HEARTBEAT_MESSAGE_ID
@@ -122,16 +132,22 @@ def is_alert_triggered(text_raw):
     return False
 
 async def process_message(event):
-    chat = await event.get_chat()
-    chat_username = f"@{chat.username}" if getattr(chat, 'username', None) else None
-
-    # Надежная защита от кольца пересылок (сравниваем и ID, и Username)
-    target_str = str(MY_TELEGRAM_ID).lower()
-    if str(event.chat_id) == target_str or (chat_username and chat_username.lower() == target_str):
+    message_text = event.message.message if event.message else event.raw_text
+    if not message_text:
         return
 
-    message_text = event.message.message if event.message else event.raw_text
+    chat = await event.get_chat()
+    chat_username = f"@{chat.username}" if getattr(chat, 'username', None) else None
     
+    # Проверка: является ли текущий чат тестовым каналом @tgalertfilter
+    target_str = str(MY_TELEGRAM_ID).lower()
+    is_test_channel = (chat_username and chat_username.lower() == "@tgalertfilter") or (str(event.chat_id) == target_str)
+
+    if is_test_channel:
+        if is_alert_triggered(message_text):
+            send_telegram_reply("тест ок")
+        return
+
     if is_alert_triggered(message_text):
         forward_telegram_message(event.chat_id, event.id)
 
