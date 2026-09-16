@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import threading
 from datetime import datetime, timedelta
 from flask import Flask
@@ -31,6 +30,20 @@ TARGET_CHANNELS = [
     # "@tgalertfilter"
 ]
 
+# Ключевые слова и подстроки (в нижнем регистре)
+# Используем короткие корни слов, чтобы ловить любые окончания
+KEYWORDS = [
+    "нивк",            # нивки, нивок, нивкам, нивках
+    "баліст",          # балістика, балістична, балістику
+    "циркон",          # циркон, циркони
+    "київ кр",         # київ кр
+    "кр київ",         # кр київ
+    "киев кр", 
+    "кр киев",
+    "пуск кр",
+    "спуск баліст"
+]
+
 client = TelegramClient(
     StringSession(SESSION_STRING), 
     API_ID, 
@@ -41,39 +54,6 @@ client = TelegramClient(
 )
 
 HEARTBEAT_MESSAGE_ID = None
-
-def normalize_text(text):
-    if not text:
-        return ""
-    return re.sub(r'[^\w\s]', ' ', text.lower())
-
-def is_alert_triggered(text_raw):
-    if not text_raw:
-        return False
-        
-    text = normalize_text(text_raw)
-    
-    # 1. Проверка локации Нивки (учитываем любые окончания)
-    if any(word in text for word in ["нивки", "нивок", "нивкам", "нивках"]):
-        return True
-
-    # 2. Угроза баллистики
-    if "загроза" in text and "баліст" in text:
-        return True
-        
-    # 3. Киев + спуск + баллистика
-    if ("київ" in text or "києв" in text) and "спуск" in text and "баліст" in text:
-        return True
-
-    # 4. Киев + Циркон
-    if ("київ" in text or "києв" in text) and "циркон" in text:
-        return True
-
-    # 5. Киев + Крылатые ракеты (КР)
-    if ("київ" in text or "києв" in text) and (" кр " in f" {text} " or "кр!" in text_raw.lower() or "кр." in text_raw.lower()):
-        return True
-
-    return False
 
 def forward_telegram_message(from_chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
@@ -87,7 +67,7 @@ def forward_telegram_message(from_chat_id, message_id):
     except Exception as e:
         print(f"Forward err: {e}", flush=True)
 
-def update_heartbeat(tick_count):
+def update_heartbeat():
     global HEARTBEAT_MESSAGE_ID
     now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
     text = f"🟢 {now_kyiv}"
@@ -97,7 +77,7 @@ def update_heartbeat(tick_count):
         payload = {
             "chat_id": MY_TELEGRAM_ID,
             "text": text,
-            "disable_notification": True  # Принудительно отправляем новый пульс без звука
+            "disable_notification": True
         }
         try:
             res = requests.post(url, json=payload, timeout=10).json()
@@ -120,11 +100,22 @@ def update_heartbeat(tick_count):
             print(f"Pulse err: {e}", flush=True)
 
 async def heartbeat_loop():
-    tick = 0
     while True:
-        tick += 1
-        update_heartbeat(tick)
+        update_heartbeat()
         await asyncio.sleep(600)
+
+def is_alert_triggered(text_raw):
+    if not text_raw:
+        return False
+        
+    text_lower = text_raw.lower()
+    
+    # Прямая проверка на наличие ключевых фраз/корней
+    for kw in KEYWORDS:
+        if kw in text_lower:
+            return True
+            
+    return False
 
 async def process_message(event):
     message_text = event.message.message if event.message else event.raw_text
