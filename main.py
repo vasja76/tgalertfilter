@@ -68,6 +68,8 @@ client = TelegramClient(
 )
 
 HEARTBEAT_MESSAGE_ID = None
+# Множество для хранения ID уже пересланных сообщений (чтобы избежать дублей)
+forwarded_msg_ids = set()
 
 def update_heartbeat():
     global HEARTBEAT_MESSAGE_ID
@@ -122,9 +124,28 @@ async def process_message(event):
     if not message_text:
         return
 
+    # Уникальный ключ сообщения (ID чата + ID сообщения)
+    msg_key = (event.chat_id, event.id)
+
+    # Если сообщение уже пересылалось ранее — игнорируем
+    if msg_key in forwarded_msg_ids:
+        return
+
     if is_alert_triggered(message_text):
         try:
-            await client.forward_messages(MY_TELEGRAM_ID, event.message)
+            # Нативная пересылка со звуком
+            await client.forward_messages(
+                MY_TELEGRAM_ID, 
+                event.message,
+                silent=False
+            )
+            # Запоминаем, что это сообщение уже отправлено
+            forwarded_msg_ids.add(msg_key)
+            
+            # Очистка старой памяти при накоплении более 1000 постов
+            if len(forwarded_msg_ids) > 1000:
+                forwarded_msg_ids.clear()
+
         except Exception as e:
             print(f"Forward err: {e}", flush=True)
 
