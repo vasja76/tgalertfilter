@@ -69,18 +69,6 @@ client = TelegramClient(
 
 HEARTBEAT_MESSAGE_ID = None
 
-def forward_telegram_message(from_chat_id, message_id):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
-    payload = {
-        "chat_id": MY_TELEGRAM_ID,
-        "from_chat_id": from_chat_id,
-        "message_id": message_id
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Forward err: {e}", flush=True)
-
 def update_heartbeat():
     global HEARTBEAT_MESSAGE_ID
     now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
@@ -135,7 +123,10 @@ async def process_message(event):
         return
 
     if is_alert_triggered(message_text):
-        forward_telegram_message(event.chat_id, event.id)
+        try:
+            await client.forward_messages(MY_TELEGRAM_ID, event.message)
+        except Exception as e:
+            print(f"Forward err: {e}", flush=True)
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
