@@ -32,11 +32,9 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
-    "@truexanewsua",
-    "@tgalertfilter"
+    "@truexanewsua"
 ]
 
-# Все ключевые слова строго в нижнем регистре
 KEYWORDS = [
     "загроза балістики",
     "київ — спуск балістики",
@@ -71,16 +69,17 @@ client = TelegramClient(
 
 HEARTBEAT_MESSAGE_ID = None
 
-def send_telegram_msg(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+def forward_telegram_message(from_chat_id, message_id):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
     payload = {
         "chat_id": MY_TELEGRAM_ID,
-        "text": text
+        "from_chat_id": from_chat_id,
+        "message_id": message_id
     }
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Send err: {e}", flush=True)
+        print(f"Forward err: {e}", flush=True)
 
 def update_heartbeat():
     global HEARTBEAT_MESSAGE_ID
@@ -135,18 +134,8 @@ async def process_message(event):
     if not message_text:
         return
 
-    chat = await event.get_chat()
-    chat_username = f"@{chat.username}" if getattr(chat, 'username', None) else None
-
     if is_alert_triggered(message_text):
-        # Если сообщение пришло из тестового канала @tgalertfilter — шлем "тест ок"
-        if chat_username and chat_username.lower() == "@tgalertfilter":
-            send_telegram_msg("тест ок")
-        else:
-            # Для остальных каналов — пересылаем с именем канала (как в 1-м рабочем коде)
-            channel_id = chat_username if chat_username else getattr(chat, 'title', 'Канал')
-            alert_msg = f">>{channel_id}\n{message_text}"
-            send_telegram_msg(alert_msg)
+        forward_telegram_message(event.chat_id, event.id)
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
