@@ -20,21 +20,8 @@ def run_flask():
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-raw_my_id = os.environ.get("MY_TELEGRAM_ID", "")
-try:
-    MY_TELEGRAM_ID = int(raw_my_id)
-except ValueError:
-    MY_TELEGRAM_ID = raw_my_id
-
+MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 SESSION_STRING = os.environ.get("SESSION_STRING")
-
-TARGET_CHANNELS = [
-    "@war_monitor",
-    "@kievreal1",
-    "@truexanewsua",
-    "@tgalertfilter"
-]
 
 # Все ключевые слова строго в нижнем регистре
 KEYWORDS = [
@@ -56,8 +43,14 @@ KEYWORDS = [
     "ракета на київ",
     "на київ",
     "балістик на київ",
-    "спуск",
-    " б"
+    "спуск"
+]
+
+TARGET_CHANNELS = [
+    "@war_monitor",
+    "@kievreal1",
+    "@truexanewsua",
+    # "@tgalertfilter"
 ]
 
 client = TelegramClient(
@@ -71,7 +64,7 @@ client = TelegramClient(
 
 HEARTBEAT_MESSAGE_ID = None
 
-def send_telegram_msg(text):
+def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": MY_TELEGRAM_ID,
@@ -82,10 +75,10 @@ def send_telegram_msg(text):
     except Exception as e:
         print(f"Send err: {e}", flush=True)
 
-def update_heartbeat():
+def update_heartbeat(tick_count):
     global HEARTBEAT_MESSAGE_ID
     now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
-    text = f"🟢 {now_kyiv}"
+    text = f"PULSE OK {now_kyiv} #{tick_count}"
     
     if HEARTBEAT_MESSAGE_ID is None:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -115,46 +108,24 @@ def update_heartbeat():
             print(f"Pulse err: {e}", flush=True)
 
 async def heartbeat_loop():
+    tick = 0
     while True:
-        update_heartbeat()
+        tick += 1
+        update_heartbeat(tick)
         await asyncio.sleep(600)
-
-def is_alert_triggered(text_raw):
-    if not text_raw:
-        return False
-        
-    text_lower = text_raw.lower()
-    for kw in KEYWORDS:
-        if kw in text_lower:
-            return True
-            
-    return False
-
-async def process_message(event):
-    message_text = event.message.message if event.message else event.raw_text
-    if not message_text:
-        return
-
-    chat = await event.get_chat()
-    chat_username = f"@{chat.username}" if getattr(chat, 'username', None) else None
-
-    if is_alert_triggered(message_text):
-        # Если сообщение пришло из тестового канала @tgalertfilter — шлем "тест ок"
-        if chat_username and chat_username.lower() == "@tgalertfilter":
-            send_telegram_msg("тест ок")
-        else:
-            # Для остальных каналов — пересылаем с именем канала (как в 1-м рабочем коде)
-            channel_id = chat_username if chat_username else getattr(chat, 'title', 'Канал')
-            alert_msg = f">>{channel_id}\n{message_text}"
-            send_telegram_msg(alert_msg)
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
-    await process_message(event)
-
-@client.on(events.MessageEdited(chats=TARGET_CHANNELS))
-async def handle_edited_message(event):
-    await process_message(event)
+    message_text = event.raw_text
+    text_lower = message_text.lower()
+    
+    if any(keyword in text_lower for keyword in KEYWORDS):
+        chat = await event.get_chat()
+        username = getattr(chat, 'username', None)
+        channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
+        
+        alert_msg = f">>{channel_id}\n{message_text}"
+        send_telegram_alert(alert_msg)
 
 async def start_telethon():
     print("Запуск Telethon...", flush=True)
@@ -165,7 +136,6 @@ async def start_telethon():
         await client.run_until_disconnected()
     except Exception as e:
         print(f"Telethon err: {e}", flush=True)
-
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(start_telethon())
