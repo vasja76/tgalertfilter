@@ -133,6 +133,7 @@ async def start_telethon():
         await client.run_until_disconnected()
     except Exception as e:
         print(f"Telethon err: {e}", flush=True)
+        
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(start_telethon())
