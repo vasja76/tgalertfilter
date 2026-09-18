@@ -30,21 +30,17 @@ KEYWORDS = [
     "київ - спуск балістики",
     "нивки",
     "нивок",
+    "нивка",
     "циркон на київ",
     "циркони київ",
-    "циркони спуск на київ",
-    "циркон",
     "київ кр",
     "кр київ",
     "вектор київ",
     "зліт міг",
     "кинджал",
-    "пуски кинджала",
-    "ракета на київ",
-    "на київ",
-    "балістик",
-    "балістика на київ",
-    "спуск"
+    "на київ ",
+    # "у київ ",
+    # "до києва "
 ]
 
 TARGET_CHANNELS = [
@@ -79,7 +75,7 @@ def send_telegram_alert(text):
 def update_heartbeat(tick_count):
     global HEARTBEAT_MESSAGE_ID
     now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
-    text = f"PULSE OK {now_kyiv} #{tick_count}"
+   text = f"🟢 {now_kyiv} #{tick_count}"
     
     if HEARTBEAT_MESSAGE_ID is None:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
