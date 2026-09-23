@@ -133,7 +133,7 @@ async def handle_new_message(event):
         username = getattr(chat, 'username', None)
         channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
         
-        alert_msg = f">>{channel_id}\n{message_text}"
+        alert_msg = f"▶ {channel_id}\n{message_text}"
         send_telegram_alert(alert_msg)
 
 async def start_telethon():
