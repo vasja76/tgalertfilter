@@ -26,6 +26,7 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 # Все ключевые слова строго в нижнем регистре
 KEYWORDS = [
     "загроза балістики",
+    "балістична загроза",
     "київ — спуск балістики",
     "київ - спуск балістики",
 
@@ -128,7 +129,7 @@ async def handle_new_message(event):
     text_lower = message_text.lower()
     
     if any(keyword in text_lower for keyword in KEYWORDS):
-        chat = await event.get_chat()
+        chat = await client.get_entity(event.chat_id)
         username = getattr(chat, 'username', None)
         channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
         
