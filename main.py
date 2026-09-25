@@ -101,7 +101,7 @@ def update_heartbeat(tick_count):
             if res.get("ok"):
                 HEARTBEAT_MESSAGE_ID = res["result"]["message_id"]
                 # Открепляем все сообщения и закрепляем новое пульсовое
-                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinAllChatMessage", json={"chat_id": MY_TELEGRAM_ID}, timeout=10)
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinAllChatMessages", json={"chat_id": MY_TELEGRAM_ID}, timeout=10)
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={"chat_id": MY_TELEGRAM_ID, "message_id": HEARTBEAT_MESSAGE_ID, "disable_notification": True}, timeout=10)
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
