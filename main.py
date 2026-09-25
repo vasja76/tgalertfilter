@@ -130,7 +130,9 @@ async def handle_new_message(event):
     
     if any(keyword in text_lower for keyword in KEYWORDS):
         chat = await client.get_entity(event.chat_id)
-        username = getattr(chat, 'username', None)
+        # username = getattr(chat, 'username', None)
+        # Если основного username нет, берем первый из массива usernames
+        username = chat.username or (chat.usernames[0].username if getattr(chat, 'usernames', None) else None)
         channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
         
         alert_msg = f"▶ {channel_id}\n{message_text}"
