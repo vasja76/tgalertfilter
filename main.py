@@ -158,9 +158,9 @@ async def process_keywords_message(text):
         KEYWORDS = list(DEFAULT_KEYWORDS)
         update_heartbeat("🔴")
 
-@client.on(events.MessageEdited(chats=MY_TELEGRAM_ID))
+@client.on(events.MessageEdited)
 async def handle_message_edit(event):
-    if event.id == KEYWORDS_MESSAGE_ID:
+    if event.chat_id == MY_TELEGRAM_ID and event.id == KEYWORDS_MESSAGE_ID:
         await process_keywords_message(event.raw_text)
 
 async def load_initial_keywords():
