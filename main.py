@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import threading
 from datetime import datetime, timedelta
 from flask import Flask
@@ -23,8 +24,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# Все ключевые слова строго в нижнем регистре
-KEYWORDS = [
+# ИД сообщения с ключевыми словами
+KEYWORDS_MESSAGE_ID = 3099291
+
+# Дефолтный список ключевых слов (все строго в нижнем регистре)
+DEFAULT_KEYWORDS = [
     "загроза балістики",
     "балістична загроза",
     "київ — спуск балістики",
@@ -57,6 +61,9 @@ KEYWORDS = [
     # "до києва "
 ]
 
+# Динамический список ключевых слов
+KEYWORDS = list(DEFAULT_KEYWORDS)
+
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
@@ -74,6 +81,8 @@ client = TelegramClient(
 )
 
 HEARTBEAT_MESSAGE_ID = None
+CURRENT_PULSE_COLOR = "🟢"
+CURRENT_TICK = 0
 
 def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -86,10 +95,29 @@ def send_telegram_alert(text):
     except Exception as e:
         print(f"Send err: {e}", flush=True)
 
-def update_heartbeat(tick_count):
-    global HEARTBEAT_MESSAGE_ID
+def parse_keywords(text):
+    parsed = []
+    for line in text.splitlines():
+        line_str = line.strip()
+        if not line_str or line_str.startswith("#"):
+            continue
+        # Вытаскиваем содержимое между кавычками
+        matches = re.findall(r'["\'](.*?)["\']', line_str)
+        for match in matches:
+            cleaned = match.strip().lower()
+            if cleaned:
+                parsed.append(cleaned)
+    if not parsed:
+        raise ValueError("Пустой список ключевых слов")
+    return parsed
+
+def update_heartbeat(color_symbol=None):
+    global HEARTBEAT_MESSAGE_ID, CURRENT_PULSE_COLOR, CURRENT_TICK
+    if color_symbol:
+        CURRENT_PULSE_COLOR = color_symbol
+
     now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
-    text = f"🟢 {now_kyiv} ({tick_count})"
+    text = f"{CURRENT_PULSE_COLOR} {now_kyiv} ({CURRENT_TICK})"
     
     if HEARTBEAT_MESSAGE_ID is None:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -102,7 +130,6 @@ def update_heartbeat(tick_count):
             res = requests.post(url, json=payload, timeout=10).json()
             if res.get("ok"):
                 HEARTBEAT_MESSAGE_ID = res["result"]["message_id"]
-                # Открепляем все сообщения и закрепляем новое пульсовое
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinAllChatMessages", json={"chat_id": MY_TELEGRAM_ID}, timeout=10)
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={"chat_id": MY_TELEGRAM_ID, "message_id": HEARTBEAT_MESSAGE_ID, "disable_notification": True}, timeout=10)
         except Exception as e:
@@ -121,11 +148,37 @@ def update_heartbeat(tick_count):
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
 
+async def process_keywords_message(text):
+    global KEYWORDS
+    try:
+        KEYWORDS = parse_keywords(text)
+        update_heartbeat("🟡")
+    except Exception as e:
+        print(f"Ошибка парсинга ключей: {e}", flush=True)
+        KEYWORDS = list(DEFAULT_KEYWORDS)
+        update_heartbeat("🔴")
+
+@client.on(events.MessageEdited(chats=MY_TELEGRAM_ID))
+async def handle_message_edit(event):
+    if event.id == KEYWORDS_MESSAGE_ID:
+        await process_keywords_message(event.raw_text)
+
+async def load_initial_keywords():
+    try:
+        msg = await client.get_messages(MY_TELEGRAM_ID, ids=KEYWORDS_MESSAGE_ID)
+        if msg and msg.raw_text:
+            await process_keywords_message(msg.raw_text)
+    except Exception as e:
+        print(f"Ошибка при первичном чтении сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
+
 async def heartbeat_loop():
-    tick = 0
+    global CURRENT_TICK, CURRENT_PULSE_COLOR
     while True:
-        tick += 1
-        update_heartbeat(tick)
+        CURRENT_TICK += 1
+        # Если текущий статус желтый (сигнал об изменении), возвращаем обычный зеленый
+        if CURRENT_PULSE_COLOR == "🟡":
+            CURRENT_PULSE_COLOR = "🟢"
+        update_heartbeat()
         await asyncio.sleep(600)
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
@@ -135,8 +188,6 @@ async def handle_new_message(event):
     
     if any(keyword in text_lower for keyword in KEYWORDS):
         chat = await client.get_entity(event.chat_id)
-        # username = getattr(chat, 'username', None)
-        # Если основного username нет, берем первый из массива usernames
         username = chat.username or (chat.usernames[0].username if getattr(chat, 'usernames', None) else None)
         channel_id = f"@{username}" if username else getattr(chat, 'title', 'Канал')
         
@@ -148,6 +199,7 @@ async def start_telethon():
     try:
         await client.start()
         print("Telethon запущен!", flush=True)
+        await load_initial_keywords()
         asyncio.create_task(heartbeat_loop())
         await client.run_until_disconnected()
     except Exception as e:
