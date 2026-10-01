@@ -24,51 +24,40 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# ИД сообщения с ключевыми словами
-KEYWORDS_MESSAGE_ID = 3099291
+# Фиксированный ID сообщения из DevTools (data-mid)
+KEYWORDS_MESSAGE_ID = 99418
 
-# Дефолтный список ключевых слов (все строго в нижнем регистре)
 DEFAULT_KEYWORDS = [
     "загроза балістики",
     "балістична загроза",
     "київ — спуск балістики",
     "київ - спуск балістики",
-
     "нивки",
     "нивок",
     "нивка",
-
     "онікс—м",
     "онікс-м",
-
     "циркони київ",
     "циркон київ",
     "циркон — київ",
-
     "київ кр",
     "кр київ",
     "зліт міг",
     "кинджал",
-
     "на київ ",
     "на київ!",
     "далі київ ",
     "на столицю",
     "вектор київ ",
-    "вектор київ!",
-
-    # "у київ ",
-    # "до києва "
+    "вектор київ!"
 ]
 
-# Динамический список ключевых слов
 KEYWORDS = list(DEFAULT_KEYWORDS)
 
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
-    "@truexanewsua",
-    # "@tgalertfilter"
+    "@truexanewsua"
 ]
 
 client = TelegramClient(
@@ -167,8 +156,8 @@ async def process_keywords_message(text):
 
 @client.on(events.MessageEdited)
 async def handle_message_edit(event):
-    if event.id == KEYWORDS_MESSAGE_ID:
-        if event.is_private and (BOT_USER_ID is None or event.chat_id == BOT_USER_ID):
+    if event.is_private and (BOT_USER_ID is None or event.chat_id == BOT_USER_ID):
+        if event.id == KEYWORDS_MESSAGE_ID:
             await process_keywords_message(event.raw_text)
 
 async def load_initial_keywords():
@@ -184,11 +173,11 @@ async def load_initial_keywords():
             if msg and msg.raw_text:
                 await process_keywords_message(msg.raw_text)
             else:
-                print(f"Сообщение {KEYWORDS_MESSAGE_ID} в чате с ботом не найдено.", flush=True)
+                print(f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено.", flush=True)
         else:
             print("Не удалось получить данные бота через getMe API", flush=True)
     except Exception as e:
-        print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID} из чата с ботом: {e}", flush=True)
+        print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
 
 async def heartbeat_loop():
     global CURRENT_TICK, CURRENT_PULSE_COLOR
