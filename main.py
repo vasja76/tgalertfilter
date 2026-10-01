@@ -125,11 +125,16 @@ def update_heartbeat(color_symbol=None):
             res = requests.post(url, json=payload, timeout=10).json()
             if res.get("ok"):
                 HEARTBEAT_MESSAGE_ID = res["result"]["message_id"]
-                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinAllChatMessages", json={"chat_id": MY_TELEGRAM_ID}, timeout=10)
-                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={"chat_id": MY_TELEGRAM_ID, "message_id": HEARTBEAT_MESSAGE_ID, "disable_notification": True}, timeout=10)
+                # Закрепляем ровно один раз при отправке нового сообщения
+                requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", 
+                    json={"chat_id": MY_TELEGRAM_ID, "message_id": HEARTBEAT_MESSAGE_ID, "disable_notification": True}, 
+                    timeout=10
+                )
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
     else:
+        # Просто редактируем текст — Telegram сам обновит плашку вверху
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
         payload = {
             "chat_id": MY_TELEGRAM_ID,
