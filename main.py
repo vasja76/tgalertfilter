@@ -83,6 +83,7 @@ client = TelegramClient(
 HEARTBEAT_MESSAGE_ID = None
 CURRENT_PULSE_COLOR = "🟢"
 CURRENT_TICK = 0
+BOT_USER_ID = None
 
 def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -101,12 +102,17 @@ def parse_keywords(text):
         line_str = line.strip()
         if not line_str or line_str.startswith("#"):
             continue
-        # Вытаскиваем содержимое между кавычками
         matches = re.findall(r'["\'](.*?)["\']', line_str)
-        for match in matches:
-            cleaned = match.strip().lower()
+        if matches:
+            for match in matches:
+                cleaned = match.lower()
+                if cleaned:
+                    parsed.append(cleaned)
+        else:
+            cleaned = line_str.lower()
             if cleaned:
                 parsed.append(cleaned)
+                
     if not parsed:
         raise ValueError("Пустой список ключевых слов")
     return parsed
@@ -152,6 +158,7 @@ async def process_keywords_message(text):
     global KEYWORDS
     try:
         KEYWORDS = parse_keywords(text)
+        print(f"Ключевые слова загружены ({len(KEYWORDS)} шт.): {KEYWORDS}", flush=True)
         update_heartbeat("🟡")
     except Exception as e:
         print(f"Ошибка парсинга ключей: {e}", flush=True)
@@ -160,22 +167,29 @@ async def process_keywords_message(text):
 
 @client.on(events.MessageEdited)
 async def handle_message_edit(event):
-    if event.chat_id == MY_TELEGRAM_ID and event.id == KEYWORDS_MESSAGE_ID:
-        await process_keywords_message(event.raw_text)
+    if event.id == KEYWORDS_MESSAGE_ID:
+        if event.is_private and (BOT_USER_ID is None or event.chat_id == BOT_USER_ID):
+            await process_keywords_message(event.raw_text)
 
 async def load_initial_keywords():
+    global BOT_USER_ID
     try:
-        msg = await client.get_messages(MY_TELEGRAM_ID, ids=KEYWORDS_MESSAGE_ID)
+        bot_username = BOT_TOKEN.split(':')[0]
+        bot_entity = await client.get_entity(f"bot{bot_username}")
+        BOT_USER_ID = bot_entity.id
+        
+        msg = await client.get_messages(bot_entity, ids=KEYWORDS_MESSAGE_ID)
         if msg and msg.raw_text:
             await process_keywords_message(msg.raw_text)
+        else:
+            print(f"Сообщение {KEYWORDS_MESSAGE_ID} в чате с ботом не найдено.", flush=True)
     except Exception as e:
-        print(f"Ошибка при первичном чтении сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
+        print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID} из чата с ботом: {e}", flush=True)
 
 async def heartbeat_loop():
     global CURRENT_TICK, CURRENT_PULSE_COLOR
     while True:
         CURRENT_TICK += 1
-        # Если текущий статус желтый (сигнал об изменении), возвращаем обычный зеленый
         if CURRENT_PULSE_COLOR == "🟡":
             CURRENT_PULSE_COLOR = "🟢"
         update_heartbeat()
