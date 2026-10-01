@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from flask import Flask
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -122,7 +122,7 @@ def update_heartbeat(color_symbol=None):
     if color_symbol:
         CURRENT_PULSE_COLOR = color_symbol
 
-    now_kyiv = (datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M")
+    now_kyiv = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%H:%M")
     text = f"{CURRENT_PULSE_COLOR} {now_kyiv} ({CURRENT_TICK})"
     
     if HEARTBEAT_MESSAGE_ID is None:
@@ -174,15 +174,19 @@ async def handle_message_edit(event):
 async def load_initial_keywords():
     global BOT_USER_ID
     try:
-        bot_username = BOT_TOKEN.split(':')[0]
-        bot_entity = await client.get_entity(f"bot{bot_username}")
-        BOT_USER_ID = bot_entity.id
-        
-        msg = await client.get_messages(bot_entity, ids=KEYWORDS_MESSAGE_ID)
-        if msg and msg.raw_text:
-            await process_keywords_message(msg.raw_text)
+        res = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe", timeout=10).json()
+        if res.get("ok"):
+            bot_username = res["result"]["username"]
+            bot_entity = await client.get_entity(bot_username)
+            BOT_USER_ID = bot_entity.id
+            
+            msg = await client.get_messages(bot_entity, ids=KEYWORDS_MESSAGE_ID)
+            if msg and msg.raw_text:
+                await process_keywords_message(msg.raw_text)
+            else:
+                print(f"Сообщение {KEYWORDS_MESSAGE_ID} в чате с ботом не найдено.", flush=True)
         else:
-            print(f"Сообщение {KEYWORDS_MESSAGE_ID} в чате с ботом не найдено.", flush=True)
+            print("Не удалось получить данные бота через getMe API", flush=True)
     except Exception as e:
         print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID} из чата с ботом: {e}", flush=True)
 
