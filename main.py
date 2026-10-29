@@ -113,7 +113,7 @@ def update_heartbeat(color_symbol=None):
     if color_symbol:
         CURRENT_PULSE_COLOR = color_symbol
     now_kyiv = (
-        datetime.now(timezone.utc) + timedelta(hours=3)
+        datetime.now(timezone.utc) + timedelta(hours=2)
     ).strftime("%H:%M")
     text = f"{CURRENT_PULSE_COLOR} {now_kyiv} ({CURRENT_TICK})"
     if HEARTBEAT_MESSAGE_ID is None:
