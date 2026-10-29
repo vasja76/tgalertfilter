@@ -13,21 +13,12 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    # Render/другой хостинг получает ответ от этого адреса,
-    # поэтому приложение считается работающим.
     return "Bot is running 24/7!", 200
 
 def run_flask():
-    # Порт берём из переменной окружения.
-    # Если переменная PORT отсутствует — используется 10000.
     port = int(os.environ.get("PORT", 10000))
-    # Запускаем Flask отдельно от Telethon,
-    # чтобы веб-сервер не блокировал работу Telegram-клиента.
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# ============================================================
-# TELEGRAM / ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
-# ============================================================
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -35,14 +26,8 @@ MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 SESSION_STRING = os.environ.get("SESSION_STRING")
 ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN")
 
-# ============================================================
-# СООБЩЕНИЕ С КЛЮЧЕВЫМИ СЛОВАМИ
-# ============================================================
 KEYWORDS_MESSAGE_ID = 99418
 
-# ============================================================
-# ДЕФОЛТНЫЙ СПИСОК КЛЮЧЕВЫХ СЛОВ
-# ============================================================
 DEFAULT_KEYWORDS = [
     "загроза балістики",
     "балістична загроза",
@@ -66,28 +51,16 @@ DEFAULT_KEYWORDS = [
     "на столицю",
     "вектор київ ",
     "вектор київ!",
-    # "у київ ",
-    # "до києва "
 ]
 
-# ============================================================
-# ТЕКУЩИЙ ДИНАМИЧЕСКИЙ СПИСОК КЛЮЧЕВЫХ СЛОВ
-# ============================================================
 KEYWORDS = list(DEFAULT_KEYWORDS)
 
-# ============================================================
-# КАНАЛЫ, КОТОРЫЕ НЕОБХОДИМО ОТСЛЕЖИВАТЬ
-# ============================================================
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
     "@truexanewsua",
-    # "@tgalertfilter"
 ]
 
-# ============================================================
-# TELETHON CLIENT
-# ============================================================
 client = TelegramClient(
     StringSession(SESSION_STRING),
     API_ID,
@@ -97,17 +70,11 @@ client = TelegramClient(
     auto_reconnect=True
 )
 
-# ============================================================
-# СОСТОЯНИЕ ПУЛЬСА / HEARTBEAT
-# ============================================================
 HEARTBEAT_MESSAGE_ID = None
 CURRENT_PULSE_COLOR = "🟢"
 CURRENT_TICK = 0
 BOT_USER_ID = None
 
-# ============================================================
-# ОТПРАВКА УВЕДОМЛЕНИЯ
-# ============================================================
 def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -119,9 +86,6 @@ def send_telegram_alert(text):
     except Exception as e:
         print(f"Send err: {e}", flush=True)
 
-# ============================================================
-# РАЗБОР СООБЩЕНИЯ С КЛЮЧЕВЫМИ СЛОВАМИ
-# ============================================================
 def parse_keywords(text):
     parsed = []
     for line in text.splitlines():
@@ -142,9 +106,6 @@ def parse_keywords(text):
         raise ValueError("Пустой список ключевых слов")
     return parsed
 
-# ============================================================
-# ОБНОВЛЕНИЕ ПУЛЬСА
-# ============================================================
 def update_heartbeat(color_symbol=None):
     global HEARTBEAT_MESSAGE_ID
     global CURRENT_PULSE_COLOR
@@ -199,9 +160,6 @@ def update_heartbeat(color_symbol=None):
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
 
-# ============================================================
-# МОНИТОРИНГ ВОЗДУШНЫХ ТРЕВОГ (Киев и Боярка)
-# ============================================================
 async def alerts_monitoring_loop():
     if not ALERTS_API_TOKEN:
         print("ALERTS_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
@@ -216,15 +174,12 @@ async def alerts_monitoring_loop():
             kyiv_alert = None
             boyarka_alert = None
             
-           for alert in active_alerts:
+            for alert in active_alerts:
                 uid = int(alert.location_uid) if alert.location_uid else 0
                 title = (alert.location_title or "").lower()
                 
-                # Київ (UID 31)
                 if uid == 31 or "м. київ" in title:
                     kyiv_alert = alert
-                
-                # Фастівський район (UID 77)
                 elif uid == 77 or "фастів" in title:
                     boyarka_alert = alert
                     
@@ -237,6 +192,7 @@ async def alerts_monitoring_loop():
                 elif kyiv_current_level is None and last_kyiv_status is not None:
                     send_telegram_alert("🟢 Відбій Київ")
                 last_kyiv_status = kyiv_current_level
+
             boyarka_current_level = boyarka_alert.alert_level if boyarka_alert else None
             if boyarka_current_level != last_boyarka_status:
                 if boyarka_current_level == "red":
@@ -248,14 +204,9 @@ async def alerts_monitoring_loop():
                 last_boyarka_status = boyarka_current_level
         except Exception as e:
             print(f"Alerts API err: {e}", flush=True)
-# ============================================================
-# ИНТЕРВАЛ ОПРОСА API в сек. По документации макс 8-10 в минуту.
-# ============================================================            
+            
         await asyncio.sleep(12)
 
-# ============================================================
-# ОБРАБОТКА СООБЩЕНИЯ С КЛЮЧЕВЫМИ СЛОВАМИ
-# ============================================================
 async def process_keywords_message(text):
     global KEYWORDS
     try:
@@ -267,18 +218,12 @@ async def process_keywords_message(text):
         KEYWORDS = list(DEFAULT_KEYWORDS)
         update_heartbeat("🔴")
 
-# ============================================================
-# ОТСЛЕЖИВАНИЕ РЕДАКТИРОВАНИЯ СООБЩЕНИЯ
-# ============================================================
 @client.on(events.MessageEdited)
 async def handle_message_edit(event):
     if event.is_private and (BOT_USER_ID is None or event.chat_id == BOT_USER_ID):
         if event.id == KEYWORDS_MESSAGE_ID:
             await process_keywords_message(event.raw_text)
 
-# ============================================================
-# ПЕРВОНАЧАЛЬНАЯ ЗАГРУЗКА КЛЮЧЕВЫХ СЛОВ
-# ============================================================
 async def load_initial_keywords():
     global BOT_USER_ID
     try:
@@ -297,9 +242,6 @@ async def load_initial_keywords():
     except Exception as e:
         print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
 
-# ============================================================
-# ЦИКЛ HEARTBEAT / ПУЛЬСА
-# ============================================================
 async def heartbeat_loop():
     global CURRENT_TICK
     global CURRENT_PULSE_COLOR
@@ -310,9 +252,6 @@ async def heartbeat_loop():
         update_heartbeat()
         await asyncio.sleep(600)
 
-# ============================================================
-# ОТСЛЕЖИВАНИЕ НОВЫХ СООБЩЕНИЙ В ЦЕЛЕВЫХ КАНАЛАХ
-# ============================================================
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
     message_text = event.raw_text
@@ -327,9 +266,6 @@ async def handle_new_message(event):
         alert_msg = f"▶ {channel_id}\n{message_text}"
         send_telegram_alert(alert_msg)
 
-# ============================================================
-# ЗАПУСК TELETHON
-# ============================================================
 async def start_telethon():
     print("Запуск Telethon...", flush=True)
     try:
@@ -342,9 +278,6 @@ async def start_telethon():
     except Exception as e:
         print(f"Telethon err: {e}", flush=True)
 
-# ============================================================
-# ГЛАВНАЯ ТОЧКА ЗАПУСКА
-# ============================================================
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(start_telethon())
