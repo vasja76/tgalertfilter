@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import re
@@ -47,16 +46,17 @@ MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
 
 # StringSession позволяет Telethon подключаться
 # без повторной авторизации по номеру телефона.
+# Сессия должна принадлежать ВАШЕМУ личному аккаунту.
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
 # Токен для API воздушных тревог
 ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN")
 
 # ============================================================
-# СООБЩЕНИЕ С КЛЮЧЕВЫМИ СЛОВАМИ
+# СООБЩЕНИЕ С КЛЮЧЕВЫМИ СЛОВАМИ (теперь в «Избранном»)
 # ============================================================
 
-# ID сообщения в «Избранном», которое бот должен отслеживать.
+# ID сообщения в чате «Избранное», которое бот должен отслеживать.
 #
 # Это именно Telegram message_id, а не ID пользователя
 # и не ID чата.
@@ -129,11 +129,6 @@ TARGET_CHANNELS = [
 # TELETHON CLIENT
 # ============================================================
 
-# Создаём Telegram-клиент.
-#
-# StringSession содержит уже сохранённую авторизацию,
-# поэтому клиент может подключаться автоматически.
-#
 # connection_retries — количество попыток повторного подключения.
 # retry_delay — задержка между попытками.
 # auto_reconnect — автоматически восстанавливать соединение.
@@ -146,26 +141,15 @@ client = TelegramClient(
     auto_reconnect=True
 )
 
-# ID текущего Telegram-аккаунта, авторизованного через Telethon.
-#
-# Используется для определения «Избранного»,
-# в котором находится отслеживаемое сообщение.
-TELETHON_USER_ID = None
-
 # ============================================================
 # СОСТОЯНИЕ ПУЛЬСА / HEARTBEAT
 # ============================================================
 
 # ID сообщения, которое используется как "пульс".
-#
-# При первом запуске сообщение ещё не существует,
-# поэтому значение None.
-#
-# После создания сообщения сюда записывается его message_id.
+# При первом запуске сообщение ещё не существует, значение None.
 HEARTBEAT_MESSAGE_ID = None
 
 # Текущий цвет состояния пульса.
-#
 # 🟢 — обычная работа.
 # 🟡 — были изменены ключевые слова.
 # 🔴 — произошла ошибка при обработке ключевых слов.
@@ -173,6 +157,10 @@ CURRENT_PULSE_COLOR = "🟢"
 
 # Счётчик циклов heartbeat.
 CURRENT_TICK = 0
+
+# Числовой ID вашего аккаунта (он же ID чата «Избранное»).
+# Определяется при первоначальной загрузке.
+SAVED_CHAT_ID = None
 
 # ============================================================
 # ОТПРАВКА УВЕДОМЛЕНИЯ
@@ -236,7 +224,6 @@ def parse_keywords(text):
         raise ValueError("Пустой список ключевых слов")
 
     return parsed
-
 
 def parse_config_and_keywords(text):
     settings = {"alerts": "on"}
@@ -464,48 +451,44 @@ async def process_keywords_message(text):
 
 @client.on(events.MessageEdited)
 async def handle_message_edit(event):
-    # Нас интересуют только сообщения в собственном «Избранном».
+    # Нас интересует только чат «Избранное» (чат с самим собой)
+    # и только сообщение с нужным ID.
     #
-    # TELETHON_USER_ID определяется при запуске клиента.
-    if (
-        TELETHON_USER_ID is not None
-        and event.chat_id == TELETHON_USER_ID
-        and event.id == KEYWORDS_MESSAGE_ID
-    ):
-        # Если сообщение изменилось —
-        # заново читаем его содержимое.
-        await process_keywords_message(event.raw_text or "")
+    # SAVED_CHAT_ID определяется при первоначальной загрузке.
+    if SAVED_CHAT_ID is not None and event.chat_id == SAVED_CHAT_ID:
+        if event.id == KEYWORDS_MESSAGE_ID:
+            # Если сообщение изменилось —
+            # заново читаем его содержимое.
+            await process_keywords_message(event.raw_text)
 
 # ============================================================
 # ПЕРВОНАЧАЛЬНАЯ ЗАГРУЗКА КЛЮЧЕВЫХ СЛОВ
 # ============================================================
 
 async def load_initial_keywords():
+    global SAVED_CHAT_ID
     try:
-        # Получаем конкретное сообщение из «Избранного»
-        # текущего Telegram-аккаунта, авторизованного через Telethon.
-        msg = await client.get_messages(
-            "me",
-            ids=KEYWORDS_MESSAGE_ID
-        )
+        # Получаем свой аккаунт.
+        # Его ID совпадает с ID чата «Избранное».
+        me = await client.get_me()
+        SAVED_CHAT_ID = me.id
+
+        # Читаем конкретное сообщение из «Избранного» по message_id.
+        msg = await client.get_messages("me", ids=KEYWORDS_MESSAGE_ID)
 
         if msg and msg.raw_text:
             # Если сообщение существует и содержит текст —
-            # загружаем из него ключевые слова.
-            print(
-                f"Управляющее сообщение {KEYWORDS_MESSAGE_ID} загружено из Избранного.",
-                flush=True
-            )
+            # загружаем из него настройки и ключевые слова.
             await process_keywords_message(msg.raw_text)
         else:
             print(
-                f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено в Избранном или не содержит текста.",
+                f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено в Избранном.",
                 flush=True
             )
 
     except Exception as e:
         print(
-            f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID} из Избранного: {e}",
+            f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}",
             flush=True
         )
 
@@ -542,7 +525,7 @@ async def heartbeat_loop():
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
     # Получаем текст нового сообщения.
-    message_text = event.raw_text or ""
+    message_text = event.raw_text
 
     # Переводим текст в нижний регистр,
     # чтобы поиск не зависел от регистра букв.
@@ -570,11 +553,8 @@ async def handle_new_message(event):
 
         # Формируем обозначение канала.
         #
-        # Если username существует:
-        # @channel
-        #
-        # Если username отсутствует:
-        # используется название канала.
+        # Если username существует: @channel
+        # Если username отсутствует: название канала.
         channel_id = (
             f"@{username}"
             if username
@@ -592,24 +572,11 @@ async def handle_new_message(event):
 # ============================================================
 
 async def start_telethon():
-    global TELETHON_USER_ID
-
     print("Запуск Telethon...", flush=True)
     try:
         # Подключаемся к Telegram.
         await client.start()
         print("Telethon запущен!", flush=True)
-
-        # Получаем ID текущего аккаунта Telethon.
-        # Он нужен для распознавания «Избранного»
-        # при отслеживании редактирования управляющего сообщения.
-        me = await client.get_me()
-        TELETHON_USER_ID = me.id
-
-        print(
-            f"ID аккаунта Telethon: {TELETHON_USER_ID}",
-            flush=True
-        )
 
         # При запуске сначала читаем существующее
         # сообщение с ключевыми словами из «Избранного».
