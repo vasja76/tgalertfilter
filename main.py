@@ -474,17 +474,11 @@ async def handle_message_edit(event):
 
 async def load_initial_keywords():
     try:
-        # Ищем сообщение перебором последних сообщений в чате, 
-        # так как прямой get_messages с ids в личке часто возвращает None
-        async for msg in client.iter_messages(MY_TELEGRAM_ID, limit=50):
-            if msg.id == KEYWORDS_MESSAGE_ID:
-                if msg.raw_text:
-                    await process_keywords_message(msg.raw_text)
-                    return
-                break
+        msg = await client.get_messages(MY_TELEGRAM_ID, ids=KEYWORDS_MESSAGE_ID)
+        if msg and msg.raw_text:
+            await process_keywords_message(msg.raw_text)
         else:
             print(f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено.", flush=True)
-
     except Exception as e:
         print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
 
