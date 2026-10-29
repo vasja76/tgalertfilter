@@ -209,48 +209,42 @@ async def alerts_monitoring_loop():
     alerts_client = AlertsClient(token=ALERTS_API_TOKEN)
     last_kyiv_status = None
     last_boyarka_status = None
-    
-   # Вывод полного справочника локаций для поиска Боярки
-    try:
-        regions = await alerts_client.get_regions()
-        print("--- Все доступные локации ---", flush=True)
-        for r in regions:
-            name = getattr(r, 'region_name', getattr(r, 'location_title', str(r)))
-            uid = getattr(r, 'region_uid', getattr(r, 'location_uid', ''))
-            if "київ" in name.lower() or "боярк" in name.lower():
-                print(f"UID: {uid} | Name: {name}", flush=True)
-        print("-------------------------------", flush=True)
-    except Exception as e:
-        print(f"Ошибка при получении справочника локаций: {e}", flush=True)
         
     while True:
         try:
             active_alerts = await alerts_client.get_active_alerts()
             kyiv_alert = None
             boyarka_alert = None
-            for alert in active_alerts:
+            
+           for alert in active_alerts:
+                uid = int(alert.location_uid) if alert.location_uid else 0
                 title = (alert.location_title or "").lower()
-                if title == "м. київ":
+                
+                # Київ (UID 31)
+                if uid == 31 or "м. київ" in title:
                     kyiv_alert = alert
-                elif "боярка" in title or "боярська" in title:
+                
+                # Фастівський район (UID 77)
+                elif uid == 77 or "фастів" in title:
                     boyarka_alert = alert
+                    
             kyiv_current_level = kyiv_alert.alert_level if kyiv_alert else None
             if kyiv_current_level != last_kyiv_status:
                 if kyiv_current_level == "red":
-                    send_telegram_alert("🔴 Повітряна тривога в м. Київ (Червоний рівень)!")
+                    send_telegram_alert("🔴 Тривога Київ / Червоний рівень")
                 elif kyiv_current_level == "yellow":
-                    send_telegram_alert("🟡 Попередження / Жовтий рівень в м. Київ!")
+                    send_telegram_alert("🟡 Тривога Київ / Жовтий рівень")
                 elif kyiv_current_level is None and last_kyiv_status is not None:
-                    send_telegram_alert("🟢 Відбій тривоги в м. Київ!")
+                    send_telegram_alert("🟢 Відбій Київ")
                 last_kyiv_status = kyiv_current_level
             boyarka_current_level = boyarka_alert.alert_level if boyarka_alert else None
             if boyarka_current_level != last_boyarka_status:
                 if boyarka_current_level == "red":
-                    send_telegram_alert("🔴 Повітряна тривога в м. Боярка (Червоний рівень)!")
+                    send_telegram_alert("🔴 Тривога Фастівський р-н / Червоний рівень")
                 elif boyarka_current_level == "yellow":
-                    send_telegram_alert("🟡 Попередження / Жовтий рівень в м. Боярка!")
+                    send_telegram_alert("🟡 Тривога Фастівський р-н / Жовтий рівень")
                 elif boyarka_current_level is None and last_boyarka_status is not None:
-                    send_telegram_alert("🟢 Відбій тривоги в м. Боярка!")
+                    send_telegram_alert("🟢 Відбій Фастівський р-н")
                 last_boyarka_status = boyarka_current_level
         except Exception as e:
             print(f"Alerts API err: {e}", flush=True)
