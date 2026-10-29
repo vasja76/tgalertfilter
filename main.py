@@ -463,19 +463,9 @@ async def process_keywords_message(text):
 
 @client.on(events.MessageEdited)
 async def handle_message_edit(event):
-    # Нас интересуют только сообщения в личном чате
-    # с нужным Telegram-аккаунтом.
-    #
-    # BOT_USER_ID определяется при первоначальной загрузке.
-    if event.is_private and (
-        BOT_USER_ID is None or event.chat_id == BOT_USER_ID
-    ):
-        # Проверяем именно ID нужного сообщения.
-        #
-        # Любые другие сообщения игнорируются.
+    # Отслеживаем изменения в личных сообщениях / Избранном ('me')
+    if event.is_private and (event.chat_id == MY_TELEGRAM_ID or event.is_self):
         if event.id == KEYWORDS_MESSAGE_ID:
-            # Если сообщение изменилось —
-            # заново читаем его содержимое.
             await process_keywords_message(event.raw_text)
 
 # ============================================================
@@ -483,46 +473,17 @@ async def handle_message_edit(event):
 # ============================================================
 
 async def load_initial_keywords():
-    global BOT_USER_ID
     try:
-        # Получаем информацию о боте через Bot API.
-        #
-        # Это позволяет узнать username бота,
-        # после чего через Telethon получаем его Telegram entity.
-        res = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getMe",
-            timeout=10
-        ).json()
+        # Читаем сообщение напрямую из Избранного / личного чата ('me')
+        msg = await client.get_messages('me', ids=KEYWORDS_MESSAGE_ID)
 
-        if res.get("ok"):
-            bot_username = res["result"]["username"]
-
-            # Получаем Telegram entity бота.
-            bot_entity = await client.get_entity(bot_username)
-
-            # Сохраняем числовой ID бота.
-            #
-            # Он затем используется в MessageEdited.
-            BOT_USER_ID = bot_entity.id
-
-            # Читаем конкретное сообщение по его message_id.
-            msg = await client.get_messages(
-                bot_entity,
-                ids=KEYWORDS_MESSAGE_ID
-            )
-
-            if msg and msg.raw_text:
-                # Если сообщение существует и содержит текст —
-                # загружаем из него ключевые слова.
-                await process_keywords_message(msg.raw_text)
-            else:
-                print(
-                    f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено.",
-                    flush=True
-                )
+        if msg and msg.raw_text:
+            # Если сообщение существует и содержит текст —
+            # загружаем из него ключевые слова.
+            await process_keywords_message(msg.raw_text)
         else:
             print(
-                "Не удалось получить данные бота через getMe API",
+                f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено.",
                 flush=True
             )
 
