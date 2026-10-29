@@ -474,25 +474,19 @@ async def handle_message_edit(event):
 
 async def load_initial_keywords():
     try:
-        # Получаем сущность текущего аккаунта через ID из переменных окружения
-        me_entity = await client.get_entity(MY_TELEGRAM_ID)
-        
-        # Читаем сообщение по его ID из вашего чата
-        msg = await client.get_messages(me_entity, ids=KEYWORDS_MESSAGE_ID)
-
-        if msg and msg.raw_text:
-            await process_keywords_message(msg.raw_text)
+        # Ищем сообщение перебором последних сообщений в чате, 
+        # так как прямой get_messages с ids в личке часто возвращает None
+        async for msg in client.iter_messages(MY_TELEGRAM_ID, limit=50):
+            if msg.id == KEYWORDS_MESSAGE_ID:
+                if msg.raw_text:
+                    await process_keywords_message(msg.raw_text)
+                    return
+                break
         else:
-            print(
-                f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено.",
-                flush=True
-            )
+            print(f"Сообщение {KEYWORDS_MESSAGE_ID} не найдено.", flush=True)
 
     except Exception as e:
-        print(
-            f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}",
-            flush=True
-        )
+        print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
 
 # ============================================================
 # ЦИКЛ HEARTBEAT / ПУЛЬСА
