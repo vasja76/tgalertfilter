@@ -2,3 +2,4 @@ telethon
 requests
 Flask
 gunicorn
+alerts-in-ua
