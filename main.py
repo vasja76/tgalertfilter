@@ -210,15 +210,18 @@ async def alerts_monitoring_loop():
     last_kyiv_status = None
     last_boyarka_status = None
     
-    # Вывод всех активных локаций в лог для отладки
+   # Вывод полного справочника локаций для поиска Боярки
     try:
-        test_alerts = await alerts_client.get_active_alerts()
-        print("--- Доступные локации в API ---", flush=True)
-        for a in test_alerts:
-            print(f"UID: {a.location_uid} | Title: {a.location_title} | Raion: {a.location_raion}", flush=True)
+        regions = await alerts_client.get_regions()
+        print("--- Все доступные локации ---", flush=True)
+        for r in regions:
+            name = getattr(r, 'region_name', getattr(r, 'location_title', str(r)))
+            uid = getattr(r, 'region_uid', getattr(r, 'location_uid', ''))
+            if "київ" in name.lower() or "боярк" in name.lower():
+                print(f"UID: {uid} | Name: {name}", flush=True)
         print("-------------------------------", flush=True)
     except Exception as e:
-        print(f"Ошибка при получении списка локаций: {e}", flush=True)
+        print(f"Ошибка при получении справочника локаций: {e}", flush=True)
         
     while True:
         try:
