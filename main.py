@@ -60,7 +60,7 @@ ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN")
 #
 # Это именно Telegram message_id, а не ID пользователя
 # и не ID чата.
-KEYWORDS_MESSAGE_ID = 3154651
+KEYWORDS_MESSAGE_ID = 103400
 
 # ============================================================
 # ДЕФОЛТНЫЙ СПИСОК КЛЮЧЕВЫХ СЛОВ
@@ -468,25 +468,33 @@ async def handle_message_edit(event):
 async def load_initial_keywords():
     global SAVED_CHAT_ID
     try:
+        # Получаем свой аккаунт.
+        # Его ID совпадает с ID чата «Избранное».
         me = await client.get_me()
         SAVED_CHAT_ID = me.id
         print(f"Вошли как: {me.first_name} (id={me.id}, @{me.username})", flush=True)
 
+        # Читаем конкретное сообщение из «Избранного» по message_id.
         msg = await client.get_messages("me", ids=KEYWORDS_MESSAGE_ID)
 
         if msg is None:
             print(f"Сообщение {KEYWORDS_MESSAGE_ID} НЕ СУЩЕСТВУЕТ в Избранном.", flush=True)
-            # Показываем последние сообщения, чтобы найти правильный ID
+            # Показываем последние сообщения, чтобы найти правильный ID.
             async for m in client.iter_messages("me", limit=10):
                 preview = (m.raw_text or "[без текста]")[:40].replace("\n", " ")
                 print(f"  id={m.id} | {preview}", flush=True)
         elif not msg.raw_text:
             print(f"Сообщение {KEYWORDS_MESSAGE_ID} найдено, но в нём нет текста.", flush=True)
         else:
+            # Сообщение существует и содержит текст —
+            # загружаем из него настройки и ключевые слова.
             await process_keywords_message(msg.raw_text)
 
     except Exception as e:
-        print(f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}", flush=True)
+        print(
+            f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}",
+            flush=True
+        )
 
 # ============================================================
 # ЦИКЛ HEARTBEAT / ПУЛЬСА
