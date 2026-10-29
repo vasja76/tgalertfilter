@@ -60,7 +60,7 @@ ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN")
 #
 # Это именно Telegram message_id, а не ID пользователя
 # и не ID чата.
-KEYWORDS_MESSAGE_ID = 99418
+KEYWORDS_MESSAGE_ID = 3154651
 
 # ============================================================
 # ДЕФОЛТНЫЙ СПИСОК КЛЮЧЕВЫХ СЛОВ
