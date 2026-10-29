@@ -209,6 +209,17 @@ async def alerts_monitoring_loop():
     alerts_client = AlertsClient(token=ALERTS_API_TOKEN)
     last_kyiv_status = None
     last_boyarka_status = None
+    
+    # Вывод всех активных локаций в лог для отладки
+    try:
+        test_alerts = await alerts_client.get_active_alerts()
+        print("--- Доступные локации в API ---", flush=True)
+        for a in test_alerts:
+            print(f"UID: {a.location_uid} | Title: {a.location_title} | Raion: {a.location_raion}", flush=True)
+        print("-------------------------------", flush=True)
+    except Exception as e:
+        print(f"Ошибка при получении списка локаций: {e}", flush=True)
+        
     while True:
         try:
             active_alerts = await alerts_client.get_active_alerts()
@@ -240,7 +251,10 @@ async def alerts_monitoring_loop():
                 last_boyarka_status = boyarka_current_level
         except Exception as e:
             print(f"Alerts API err: {e}", flush=True)
-        await asyncio.sleep(20)
+# ============================================================
+# ИНТЕРВАЛ ОПРОСА API в сек. По документации макс 8-10 в минуту.
+# ============================================================            
+        await asyncio.sleep(12)
 
 # ============================================================
 # ОБРАБОТКА СООБЩЕНИЯ С КЛЮЧЕВЫМИ СЛОВАМИ
