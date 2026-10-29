@@ -474,12 +474,13 @@ async def handle_message_edit(event):
 
 async def load_initial_keywords():
     try:
-        # Читаем сообщение напрямую из Избранного / личного чата ('me')
-        msg = await client.get_messages('me', ids=KEYWORDS_MESSAGE_ID)
+        # Получаем сущность текущего аккаунта через ID из переменных окружения
+        me_entity = await client.get_entity(MY_TELEGRAM_ID)
+        
+        # Читаем сообщение по его ID из вашего чата
+        msg = await client.get_messages(me_entity, ids=KEYWORDS_MESSAGE_ID)
 
         if msg and msg.raw_text:
-            # Если сообщение существует и содержит текст —
-            # загружаем из него ключевые слова.
             await process_keywords_message(msg.raw_text)
         else:
             print(
