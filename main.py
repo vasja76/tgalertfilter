@@ -474,7 +474,7 @@ async def handle_message_edit(event):
 
 async def load_initial_keywords():
     try:
-        msg = await client.get_messages(MY_TELEGRAM_ID, ids=KEYWORDS_MESSAGE_ID)
+        msg = await client.get_messages("me", ids=KEYWORDS_MESSAGE_ID)
         if msg and msg.raw_text:
             await process_keywords_message(msg.raw_text)
         else:
