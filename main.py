@@ -207,18 +207,43 @@ def send_telegram_alert(text, silent=False, chat_id=None):
 # МОНИТОРИНГ ВОЗДУШНЫХ ТРЕВОГ
 # ============================================================
 
+# Районы, за которыми следим.
+# uid — код региона в API, title_part — запасной поиск по названию.
+WATCHED_DISTRICTS = [
+    {"key": "kyiv", "name": "Київ", "uid": 31, "title_part": "м. київ"},
+    {"key": "fastiv", "name": "Фастівський р-н", "uid": 77, "title_part": "фастів"},
+]
+
+def build_alert_messages(changes):
+    # changes: {ключ района: новый статус}. Районы с одинаковым новым
+    # статусом объединяются в одно сообщение, разные — отдельные сообщения.
+    groups = {}
+    for d in WATCHED_DISTRICTS:
+        if d["key"] in changes:
+            groups.setdefault(changes[d["key"]], []).append(d["name"])
+
+    messages = []  # список (текст, без_звука)
+    for level, names in groups.items():
+        joined = " і ".join(names)
+        if level == "red":
+            messages.append((f"🔴 Тривога {joined} / Червоний рівень", False))
+        elif level == "yellow":
+            messages.append((f"🟡 Тривога {joined} / Жовтий рівень", yellow_is_silent()))
+        elif level is None:
+            # Відбій всегда со звуком.
+            messages.append((f"🟢 Відбій {joined}", False))
+    return messages
+
 async def alerts_monitoring_loop():
     global ALERTS_LAST_OK
     if not ALERTS_API_TOKEN:
         print("ALERTS_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
         return
     alerts_client = AlertsClient(token=ALERTS_API_TOKEN)
-    last_kyiv_status = None
-    last_boyarka_status = None
+    last_status = {d["key"]: None for d in WATCHED_DISTRICTS}
 
     while True:
-        # Настройки берём из памяти — их обновляют команды /alerts и /reload,
-        # без запроса в БД каждые 12 секунд.
+        # Настройки берём из памяти — их обновляют команды /alerts и /reload.
         if BOT_SETTINGS.get("alerts", "on") == "off":
             # Пока мониторинг выключен, не считаем это поломкой.
             ALERTS_LAST_OK = time.time()
@@ -226,39 +251,30 @@ async def alerts_monitoring_loop():
             continue
 
         try:
-            active_alerts = await alerts_client.get_active_alerts()
+            # Один запрос возвращает все активные тревоги по стране.
+            active_alerts = list(await alerts_client.get_active_alerts())
             ALERTS_LAST_OK = time.time()
-            kyiv_alert = None
-            boyarka_alert = None
 
+            # Пустой список — это нормальный ответ: тревог по стране нет,
+            # значит в наших районах отбой. Ошибки запроса (сеть, токен)
+            # выбрасывают исключение и статусы не меняют.
+
+            # Текущий статус каждого района: None, "yellow" или "red".
+            current = {d["key"]: None for d in WATCHED_DISTRICTS}
             for alert in active_alerts:
                 uid = int(alert.location_uid) if alert.location_uid else 0
                 title = (alert.location_title or "").lower()
+                for d in WATCHED_DISTRICTS:
+                    if uid == d["uid"] or d["title_part"] in title:
+                        current[d["key"]] = alert.alert_level
+                        break
 
-                if uid == 31 or "м. київ" in title:
-                    kyiv_alert = alert
-                elif uid == 77 or "фастів" in title:
-                    boyarka_alert = alert
+            # Сообщения только по тем районам, где статус изменился.
+            changes = {k: v for k, v in current.items() if v != last_status[k]}
+            for text, silent in build_alert_messages(changes):
+                send_telegram_alert(text, silent=silent)
 
-            kyiv_current_level = kyiv_alert.alert_level if kyiv_alert else None
-            if kyiv_current_level != last_kyiv_status:
-                if kyiv_current_level == "red":
-                    send_telegram_alert("🔴 Тривога Київ / Червоний рівень")
-                elif kyiv_current_level == "yellow":
-                    send_telegram_alert("🟡 Тривога Київ / Жовтий рівень", silent=yellow_is_silent())
-                elif kyiv_current_level is None and last_kyiv_status is not None:
-                    send_telegram_alert("🟢 Відбій Київ")
-                last_kyiv_status = kyiv_current_level
-
-            boyarka_current_level = boyarka_alert.alert_level if boyarka_alert else None
-            if boyarka_current_level != last_boyarka_status:
-                if boyarka_current_level == "red":
-                    send_telegram_alert("🔴 Тривога Фастівський р-н / Червоний рівень")
-                elif boyarka_current_level == "yellow":
-                    send_telegram_alert("🟡 Тривога Фастівський р-н / Жовтий рівень", silent=yellow_is_silent())
-                elif boyarka_current_level is None and last_boyarka_status is not None:
-                    send_telegram_alert("🟢 Відбій Фастівський р-н")
-                last_boyarka_status = boyarka_current_level
+            last_status.update(current)
         except Exception as e:
             print(f"Alerts API err: {e}", flush=True)
 
