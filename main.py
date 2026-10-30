@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from collections import deque
 import threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask
@@ -177,6 +178,14 @@ HEARTBEAT_MESSAGE_ID = None
 # Время последнего успешного запроса к API тревог (для пульса).
 ALERTS_LAST_OK = time.time()
 
+# Клиент API тревог (создаётся в alerts_monitoring_loop, им же пользуется /now).
+ALERTS_CLIENT = None
+
+# Время всех запросов к API тревог за последнюю минуту (цикл + команда /now).
+# Нужен, чтобы вместе они не превысили лимит API.
+API_REQUEST_TIMES = deque()
+API_LIMIT_PER_MIN = 8
+
 # Числовой ID бота — начало токена до двоеточия.
 # Он же chat_id личного чата с ботом в Telethon (откуда приходят команды).
 BOT_USER_ID = int(BOT_TOKEN.split(":")[0])
@@ -214,6 +223,42 @@ WATCHED_DISTRICTS = [
     {"key": "fastiv", "name": "Фастівський р-н", "uid": 77, "title_part": "фастів"},
 ]
 
+def api_requests_last_minute():
+    now = time.time()
+    while API_REQUEST_TIMES and now - API_REQUEST_TIMES[0] > 60:
+        API_REQUEST_TIMES.popleft()
+    return len(API_REQUEST_TIMES)
+
+def register_api_request():
+    API_REQUEST_TIMES.append(time.time())
+
+def compute_current_status(active_alerts):
+    # Текущий статус каждого района: None, "yellow" или "red".
+    current = {d["key"]: None for d in WATCHED_DISTRICTS}
+    for alert in active_alerts:
+        uid = int(alert.location_uid) if alert.location_uid else 0
+        title = (alert.location_title or "").lower()
+        for d in WATCHED_DISTRICTS:
+            if uid == d["uid"] or d["title_part"] in title:
+                current[d["key"]] = alert.alert_level
+                break
+    return current
+
+STATUS_TEXT = {
+    "red": "🔴 красная тревога",
+    "yellow": "🟡 жёлтая тревога",
+    None: "🟢 тревоги нет",
+}
+
+def format_status(current):
+    lines = ["📡 Статус тревог сейчас:"]
+    for d in WATCHED_DISTRICTS:
+        level = current[d["key"]]
+        lines.append(f'{d["name"]}: {STATUS_TEXT.get(level, "❓ " + str(level))}')
+    if BOT_SETTINGS.get("alerts", "on") == "off":
+        lines.append("\n⚠️ Автомониторинг выключен (/alerts on)")
+    return "\n".join(lines)
+
 def build_alert_messages(changes):
     # changes: {ключ района: новый статус}. Районы с одинаковым новым
     # статусом объединяются в одно сообщение, разные — отдельные сообщения.
@@ -236,10 +281,12 @@ def build_alert_messages(changes):
 
 async def alerts_monitoring_loop():
     global ALERTS_LAST_OK
+    global ALERTS_CLIENT
     if not ALERTS_API_TOKEN:
         print("ALERTS_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
         return
     alerts_client = AlertsClient(token=ALERTS_API_TOKEN)
+    ALERTS_CLIENT = alerts_client
     last_status = {d["key"]: None for d in WATCHED_DISTRICTS}
 
     while True:
@@ -252,6 +299,7 @@ async def alerts_monitoring_loop():
 
         try:
             # Один запрос возвращает все активные тревоги по стране.
+            register_api_request()
             active_alerts = list(await alerts_client.get_active_alerts())
             ALERTS_LAST_OK = time.time()
 
@@ -259,15 +307,7 @@ async def alerts_monitoring_loop():
             # значит в наших районах отбой. Ошибки запроса (сеть, токен)
             # выбрасывают исключение и статусы не меняют.
 
-            # Текущий статус каждого района: None, "yellow" или "red".
-            current = {d["key"]: None for d in WATCHED_DISTRICTS}
-            for alert in active_alerts:
-                uid = int(alert.location_uid) if alert.location_uid else 0
-                title = (alert.location_title or "").lower()
-                for d in WATCHED_DISTRICTS:
-                    if uid == d["uid"] or d["title_part"] in title:
-                        current[d["key"]] = alert.alert_level
-                        break
+            current = compute_current_status(active_alerts)
 
             # Сообщения только по тем районам, где статус изменился.
             changes = {k: v for k, v in current.items() if v != last_status[k]}
@@ -430,6 +470,7 @@ HELP_TEXT = (
     "/list — настройки и список слов\n\n"
     "/alerts on | off — мониторинг воздушных тревог\n\n"
     "/yellow silent | sound — жёлтые тревоги без звука / со звуком\n\n"
+    "/now — статус тревог прямо сейчас (внеочередной запрос)\n\n"
     "/reload — перечитать данные из Supabase (после ручной правки таблиц)\n\n"
     "/help — эта справка"
 )
@@ -441,6 +482,7 @@ HELP_TEXT = (
 async def handle_my_commands(event):
     global KEYWORDS
     global BOT_SETTINGS
+    global ALERTS_LAST_OK
 
     # Команды принимаются только в личном чате с ботом.
     if event.chat_id != BOT_USER_ID:
@@ -526,6 +568,26 @@ async def handle_my_commands(event):
                 "Используйте /yellow silent или /yellow sound"
             )
 
+    elif text == "/now":
+        # Внеочередной запрос статуса тревог. Работает независимо от цикла
+        # опроса (ждать 12 секунд не нужно) и только показывает статус:
+        # цикл опроса продолжает работать по обычным правилам и сам
+        # отправит в группу сообщение, если статус изменился.
+        if ALERTS_CLIENT is None:
+            await reply("❌ ALERTS_API_TOKEN не задан, запрос невозможен")
+        elif api_requests_last_minute() >= API_LIMIT_PER_MIN - 1:
+            # Запас в 1 запрос до лимита API.
+            await reply("⏳ Лимит запросов к API исчерпан, повторите через 10–15 секунд")
+        else:
+            try:
+                register_api_request()
+                active = list(await ALERTS_CLIENT.get_active_alerts())
+                ALERTS_LAST_OK = time.time()
+                await reply(format_status(compute_current_status(active)))
+            except Exception as e:
+                print(f"/now err: {e}", flush=True)
+                await reply(f"❌ Не удалось получить статус: {e}")
+
     elif text == "/help":
         await reply(HELP_TEXT)
 
@@ -601,4 +663,3 @@ async def start_telethon():
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(start_telethon())
-    
