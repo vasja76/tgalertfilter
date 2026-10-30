@@ -3,3 +3,4 @@ requests
 Flask
 gunicorn
 alerts-in-ua
+supabase
