@@ -1,6 +1,6 @@
 import asyncio
 import os
-import re
+import time
 import threading
 from datetime import datetime, timezone, timedelta
 from flask import Flask
@@ -8,130 +8,162 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import requests
 from alerts_in_ua import AsyncClient as AlertsClient
+from supabase import create_client, Client
 
 # ============================================================
-# FLASK — простой веб-сервер для проверки, что приложение работает
+# FLASK — веб-сервер для Render
 # ============================================================
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    # Render/другой хостинг получает ответ от этого адреса,
-    # поэтому приложение считается работающим.
     return "Bot is running 24/7!", 200
 
 def run_flask():
-    # Порт берём из переменной окружения.
-    # Если переменная PORT отсутствует — используется 10000.
     port = int(os.environ.get("PORT", 10000))
-    # Запускаем Flask отдельно от Telethon,
-    # чтобы веб-сервер не блокировал работу Telegram-клиента.
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # ============================================================
-# TELEGRAM / ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
 # ============================================================
 
-# API_ID и API_HASH — данные Telegram API.
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
-
-# BOT_TOKEN используется для отправки сообщений
-# через официальный Bot API.
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-# Telegram ID пользователя, которому бот отправляет уведомления.
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))
-
-# StringSession позволяет Telethon подключаться
-# без повторной авторизации по номеру телефона.
-# Сессия должна принадлежать ВАШЕМУ личному аккаунту.
 SESSION_STRING = os.environ.get("SESSION_STRING")
-
-# Токен для API воздушных тревог
 ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN")
 
-# ============================================================
-# СООБЩЕНИЕ С КЛЮЧЕВЫМИ СЛОВАМИ (теперь в «Избранном»)
-# ============================================================
+# SUPABASE_KEY — это service_role ключ (Project Settings -> API).
+# Он обходит RLS и хранится только на сервере.
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# ID сообщения в чате «Избранное», которое бот должен отслеживать.
-#
-# Это именно Telegram message_id, а не ID пользователя
-# и не ID чата.
-KEYWORDS_MESSAGE_ID = 103400
+supabase: Client = (
+    create_client(SUPABASE_URL, SUPABASE_KEY)
+    if SUPABASE_URL and SUPABASE_KEY else None
+)
+if not supabase:
+    print("ВНИМАНИЕ: SUPABASE_URL/SUPABASE_KEY не заданы, список слов будет пустым!", flush=True)
 
-# ============================================================
-# ДЕФОЛТНЫЙ СПИСОК КЛЮЧЕВЫХ СЛОВ
-# ============================================================
+# yellow_silent = on  -> сообщения о жёлтой тревоге приходят без звука
+# (красные тревоги и «Відбій» всегда со звуком)
+DEFAULT_SETTINGS = {"alerts": "on", "yellow_silent": "off"}
 
-# Этот список используется:
-# 1. при первом запуске;
-# 2. если сообщение с ключевыми словами не удалось обработать.
-#
-# Все ключевые слова хранятся в нижнем регистре,
-# поэтому входящие сообщения также переводятся в нижний регистр.
-DEFAULT_KEYWORDS = [
-    "загроза балістики",
-    "балістична загроза",
-    "київ — спуск балістики",
-    "київ - спуск балістики",
-    "нивки",
-    "нивок",
-    "нивка",
-    "онікс—м",
-    "онікс-м",
-    "циркони київ",
-    "циркон київ",
-    "циркон — київ",
-    "київ кр",
-    "кр київ",
-    "зліт міг",
-    "кинджал",
-    "на київ ",
-    "на київ!",
-    "далі київ ",
-    "на столицю",
-    "вектор київ ",
-    "вектор київ!",
-    # "у київ ",
-    # "до києва "
-]
+# Результат ПОСЛЕДНЕГО реального обращения к БД (старт, команды).
+# Пульс только читает этот флаг и сам в БД не ходит.
+DB_OK = supabase is not None
+
+def _db_ok(flag):
+    global DB_OK
+    DB_OK = flag
 
 # ============================================================
-# ТЕКУЩИЙ ДИНАМИЧЕСКИЙ СПИСОК КЛЮЧЕВЫХ СЛОВ И НАСТРОЙКИ
+# РАБОТА С SUPABASE
+# ============================================================
+# Функции чтения возвращают None при ошибке (а не пустой список),
+# чтобы сбой БД не стирал рабочий список слов в памяти.
+
+def db_get_settings():
+    if not supabase:
+        return dict(DEFAULT_SETTINGS)
+    try:
+        res = supabase.table("bot_settings").select("key, value").execute()
+        _db_ok(True)
+        settings = dict(DEFAULT_SETTINGS)
+        settings.update({row["key"]: row["value"] for row in res.data})
+        return settings
+    except Exception as e:
+        print(f"DB settings err: {e}", flush=True)
+        _db_ok(False)
+        return None
+
+def db_get_keywords():
+    if not supabase:
+        return []
+    try:
+        res = supabase.table("keywords").select("word").execute()
+        _db_ok(True)
+        # Пустые слова отбрасываем: "" содержится в любой строке
+        # и бот реагировал бы на каждое сообщение.
+        return [
+            row["word"].lower()
+            for row in res.data
+            if row.get("word") and row["word"].strip()
+        ]
+    except Exception as e:
+        print(f"DB keywords err: {e}", flush=True)
+        _db_ok(False)
+        return None
+
+def db_add_keyword(word):
+    if not supabase:
+        return False
+    try:
+        supabase.table("keywords").upsert({"word": word}, on_conflict="word").execute()
+        _db_ok(True)
+        return True
+    except Exception as e:
+        print(f"DB add keyword err: {e}", flush=True)
+        _db_ok(False)
+        return False
+
+def db_del_keyword(word):
+    # Возвращает количество удалённых строк или None при ошибке.
+    if not supabase:
+        return None
+    try:
+        res = supabase.table("keywords").delete().eq("word", word).execute()
+        _db_ok(True)
+        return len(res.data or [])
+    except Exception as e:
+        print(f"DB del keyword err: {e}", flush=True)
+        _db_ok(False)
+        return None
+
+def db_set_setting(key, value):
+    if not supabase:
+        return False
+    try:
+        supabase.table("bot_settings").upsert({"key": key, "value": value}, on_conflict="key").execute()
+        _db_ok(True)
+        return True
+    except Exception as e:
+        print(f"DB set setting err: {e}", flush=True)
+        _db_ok(False)
+        return False
+
+def db_ping():
+    # Лёгкий запрос раз в сутки: бесплатный Supabase усыпляет проект
+    # после недели без активности. Заодно обновляет флаг DB_OK для пульса.
+    if not supabase:
+        return False
+    try:
+        supabase.table("bot_settings").select("key").limit(1).execute()
+        _db_ok(True)
+        return True
+    except Exception as e:
+        print(f"DB ping err: {e}", flush=True)
+        _db_ok(False)
+        return False
+
+# ============================================================
+# ГЛОБАЛЬНЫЕ СОСТОЯНИЯ
 # ============================================================
 
-# В обычной работе именно этот список используется
-# для проверки новых сообщений из каналов.
-#
-# В начале работы он является копией DEFAULT_KEYWORDS.
-# После чтения сообщения KEYWORDS_MESSAGE_ID
-# список может быть заменён содержимым этого сообщения.
-KEYWORDS = list(DEFAULT_KEYWORDS)
+KEYWORDS = db_get_keywords() or []
+BOT_SETTINGS = db_get_settings() or dict(DEFAULT_SETTINGS)
 
-# Дефолтные настройки бота (мониторинг тревог включен)
-BOT_SETTINGS = {"alerts": "on"}
-
-# ============================================================
-# КАНАЛЫ, КОТОРЫЕ НЕОБХОДИМО ОТСЛЕЖИВАТЬ
-# ============================================================
+def yellow_is_silent():
+    return BOT_SETTINGS.get("yellow_silent", "off") == "on"
 
 TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
     "@truexanewsua",
-    # "@tgalertfilter"
 ]
 
-# ============================================================
-# TELETHON CLIENT
-# ============================================================
-
-# connection_retries — количество попыток повторного подключения.
-# retry_delay — задержка между попытками.
-# auto_reconnect — автоматически восстанавливать соединение.
 client = TelegramClient(
     StringSession(SESSION_STRING),
     API_ID,
@@ -141,115 +173,34 @@ client = TelegramClient(
     auto_reconnect=True
 )
 
-# ============================================================
-# СОСТОЯНИЕ ПУЛЬСА / HEARTBEAT
-# ============================================================
-
-# ID сообщения, которое используется как "пульс".
-# При первом запуске сообщение ещё не существует, значение None.
 HEARTBEAT_MESSAGE_ID = None
-
-# Текущий цвет состояния пульса.
-# 🟢 — обычная работа.
-# 🟡 — были изменены ключевые слова.
-# 🔴 — произошла ошибка при обработке ключевых слов.
-CURRENT_PULSE_COLOR = "🟢"
-
-# Счётчик циклов heartbeat.
+# Время последнего успешного запроса к API тревог (для пульса).
+ALERTS_LAST_OK = time.time()
 CURRENT_TICK = 0
 
-# Числовой ID вашего аккаунта (он же ID чата «Избранное»).
-# Определяется при первоначальной загрузке.
-SAVED_CHAT_ID = None
+# Числовой ID бота — начало токена до двоеточия.
+# Он же является chat_id личного чата с ботом в Telethon.
+BOT_USER_ID = int(BOT_TOKEN.split(":")[0])
 
-# ============================================================
-# ОТПРАВКА УВЕДОМЛЕНИЯ
-# ============================================================
-
-def send_telegram_alert(text):
-    # Используем Telegram Bot API для отправки уведомления.
+def send_telegram_alert(text, silent=False):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": MY_TELEGRAM_ID,
         "text": text
     }
+    if silent:
+        payload["disable_notification"] = True
     try:
-        requests.post(
-            url,
-            json=payload,
-            timeout=10
-        )
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        # Ошибка отправки уведомления не должна
-        # останавливать весь Telegram-клиент.
         print(f"Send err: {e}", flush=True)
 
 # ============================================================
-# РАЗБОР СООБЩЕНИЯ С КЛЮЧЕВЫМИ СЛОВАМИ
-# ============================================================
-
-def parse_keywords(text):
-    parsed = []
-    # Обрабатываем сообщение построчно.
-    for line in text.splitlines():
-        line_str = line.strip()
-        # Пустые строки и строки-комментарии пропускаем.
-        if not line_str or line_str.startswith("#"):
-            continue
-        # Вытаскиваем содержимое между кавычками.
-        #
-        # Например:
-        # "київ"
-        #
-        # превратится в:
-        # київ
-        matches = re.findall(r'["\'](.*?)["\']', line_str)
-        if matches:
-            # Если в строке есть кавычки,
-            # используем найденное содержимое.
-            for match in matches:
-                cleaned = match.lower()
-                if cleaned:
-                    parsed.append(cleaned)
-        else:
-            # Если кавычек нет, используем всю строку
-            # как ключевое слово.
-            cleaned = line_str.lower()
-            if cleaned:
-                parsed.append(cleaned)
-
-    # Если после обработки ничего не получили,
-    # считаем сообщение некорректным.
-    if not parsed:
-        raise ValueError("Пустой список ключевых слов")
-
-    return parsed
-
-def parse_config_and_keywords(text):
-    settings = {"alerts": "on"}
-    keyword_lines = text
-
-    if "---" in text:
-        parts = text.split("---", 1)
-        settings_part = parts[0]
-        keyword_lines = parts[1]
-
-        for line in settings_part.splitlines():
-            line_str = line.strip()
-            if not line_str or line_str.startswith("#"):
-                continue
-            if "=" in line_str:
-                key, val = line_str.split("=", 1)
-                settings[key.strip().lower()] = val.strip().lower()
-
-    parsed_keywords = parse_keywords(keyword_lines)
-    return settings, parsed_keywords
-
-# ============================================================
-# МОНИТОРИНГ ВОЗДУШНЫХ ТРЕВОГ (Киев и Фастовский район)
+# МОНИТОРИНГ ВОЗДУШНЫХ ТРЕВОГ
 # ============================================================
 
 async def alerts_monitoring_loop():
+    global ALERTS_LAST_OK
     if not ALERTS_API_TOKEN:
         print("ALERTS_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
         return
@@ -258,13 +209,17 @@ async def alerts_monitoring_loop():
     last_boyarka_status = None
 
     while True:
-        # Если в конфигурации ТГ-сообщения выставлено alerts = off, пропускаем мониторинг
-        if BOT_SETTINGS.get("alerts") == "off":
+        # Настройки берём из памяти — их обновляют команды /alerts и /reload,
+        # без запроса в БД каждые 12 секунд.
+        if BOT_SETTINGS.get("alerts", "on") == "off":
+            # Пока мониторинг выключен, не считаем это поломкой.
+            ALERTS_LAST_OK = time.time()
             await asyncio.sleep(10)
             continue
 
         try:
             active_alerts = await alerts_client.get_active_alerts()
+            ALERTS_LAST_OK = time.time()
             kyiv_alert = None
             boyarka_alert = None
 
@@ -272,10 +227,8 @@ async def alerts_monitoring_loop():
                 uid = int(alert.location_uid) if alert.location_uid else 0
                 title = (alert.location_title or "").lower()
 
-                # Київ (UID 31)
                 if uid == 31 or "м. київ" in title:
                     kyiv_alert = alert
-                # Фастівський район (UID 77)
                 elif uid == 77 or "фастів" in title:
                     boyarka_alert = alert
 
@@ -284,7 +237,7 @@ async def alerts_monitoring_loop():
                 if kyiv_current_level == "red":
                     send_telegram_alert("🔴 Тривога Київ / Червоний рівень")
                 elif kyiv_current_level == "yellow":
-                    send_telegram_alert("🟡 Тривога Київ / Жовтий рівень")
+                    send_telegram_alert("🟡 Тривога Київ / Жовтий рівень", silent=yellow_is_silent())
                 elif kyiv_current_level is None and last_kyiv_status is not None:
                     send_telegram_alert("🟢 Відбій Київ")
                 last_kyiv_status = kyiv_current_level
@@ -294,7 +247,7 @@ async def alerts_monitoring_loop():
                 if boyarka_current_level == "red":
                     send_telegram_alert("🔴 Тривога Фастівський р-н / Червоний рівень")
                 elif boyarka_current_level == "yellow":
-                    send_telegram_alert("🟡 Тривога Фастівський р-н / Жовтий рівень")
+                    send_telegram_alert("🟡 Тривога Фастівський р-н / Жовтий рівень", silent=yellow_is_silent())
                 elif boyarka_current_level is None and last_boyarka_status is not None:
                     send_telegram_alert("🟢 Відбій Фастівський р-н")
                 last_boyarka_status = boyarka_current_level
@@ -304,54 +257,32 @@ async def alerts_monitoring_loop():
         await asyncio.sleep(12)
 
 # ============================================================
-# ОБНОВЛЕНИЕ ПУЛЬСА
+# ПУЛЬС / HEARTBEAT
 # ============================================================
 
-def update_heartbeat(color_symbol=None):
+def update_heartbeat(problems=None):
     global HEARTBEAT_MESSAGE_ID
-    global CURRENT_PULSE_COLOR
-    global CURRENT_TICK
 
-    # Если передан новый цвет — меняем текущее состояние.
-    if color_symbol:
-        CURRENT_PULSE_COLOR = color_symbol
-
-    # Получаем текущее время UTC и переводим его
-    # в киевское время (учитывая зимнее время UTC+2).
     now_kyiv = (
         datetime.now(timezone.utc) + timedelta(hours=2)
     ).strftime("%H:%M")
 
-    # Формат сообщения пульса:
-    #
-    # 🟢 11:30 (5)
-    #
-    # Цвет + время + номер цикла.
-    text = f"{CURRENT_PULSE_COLOR} {now_kyiv} ({CURRENT_TICK})"
-
-    # ========================================================
-    # ЕСЛИ ПУЛЬС ЕЩЁ НЕ СОЗДАН
-    # ========================================================
+    if problems:
+        text = f"🔴 {now_kyiv} ({CURRENT_TICK}) · {', '.join(problems)}"
+    else:
+        text = f"🟢 {now_kyiv} ({CURRENT_TICK})"
 
     if HEARTBEAT_MESSAGE_ID is None:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": MY_TELEGRAM_ID,
             "text": text,
-            # Пульс не должен давать звуковое уведомление.
             "disable_notification": True
         }
         try:
-            res = requests.post(
-                url,
-                json=payload,
-                timeout=10
-            ).json()
-
+            res = requests.post(url, json=payload, timeout=10).json()
             if res.get("ok"):
-                # Запоминаем ID созданного сообщения.
                 HEARTBEAT_MESSAGE_ID = res["result"]["message_id"]
-
                 try:
                     requests.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/unpinAllChatMessages",
@@ -361,7 +292,6 @@ def update_heartbeat(color_symbol=None):
                 except Exception:
                     pass
 
-                # Закрепляем ровно один раз при отправке нового сообщения.
                 requests.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage",
                     json={
@@ -373,179 +303,231 @@ def update_heartbeat(color_symbol=None):
                 )
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
-
-    # ========================================================
-    # ЕСЛИ ПУЛЬС УЖЕ СУЩЕСТВУЕТ
-    # ========================================================
-
     else:
-        # Просто редактируем текст — Telegram сам обновит
-        # плашку закреплённого сообщения вверху.
-        #
-        # Новое сообщение при каждом цикле НЕ создаётся.
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-
         payload = {
             "chat_id": MY_TELEGRAM_ID,
             "message_id": HEARTBEAT_MESSAGE_ID,
             "text": text
         }
-
         try:
-            res = requests.post(
-                url,
-                json=payload,
-                timeout=10
-            ).json()
-
-            # Если Telegram сообщает об ошибке редактирования,
-            # сбрасываем ID.
-            #
-            # При следующем обновлении будет создано
-            # новое сообщение пульса.
+            res = requests.post(url, json=payload, timeout=10).json()
             if not res.get("ok"):
                 HEARTBEAT_MESSAGE_ID = None
-
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
 
-# ============================================================
-# ОБРАБОТКА СООБЩЕНИЯ С КЛЮЧЕВЫМИ СЛОВАМИ
-# ============================================================
+async def check_health():
+    # Возвращает список проблем. Пустой список — всё в порядке.
+    problems = []
 
-async def process_keywords_message(text):
-    global KEYWORDS
-    global BOT_SETTINGS
+    # 1. Telegram: реальный запрос к серверам, а не просто флаг подключения.
     try:
-        # Пытаемся разобрать настройки и ключевые слова
-        BOT_SETTINGS, KEYWORDS = parse_config_and_keywords(text)
-
-        # Выводим в лог, какие настройки и ключевые слова реально загрузились.
-        print(
-            f"Настройки: {BOT_SETTINGS} | Ключевые слова загружены ({len(KEYWORDS)} шт.): {KEYWORDS}",
-            flush=True
-        )
-
-        # Жёлтый пульс означает:
-        # сообщение с настройками было изменено
-        # и новые ключевые слова успешно загружены.
-        update_heartbeat("🟡")
-
-    except Exception as e:
-        print(
-            f"Ошибка парсинга конфига/ключей: {e}",
-            flush=True
-        )
-
-        # Если новые ключевые слова некорректны,
-        # возвращаем рабочий список по умолчанию.
-        KEYWORDS = list(DEFAULT_KEYWORDS)
-        BOT_SETTINGS = {"alerts": "on"}
-
-        # Красный пульс показывает ошибку.
-        update_heartbeat("🔴")
-
-# ============================================================
-# ОТСЛЕЖИВАНИЕ РЕДАКТИРОВАНИЯ СООБЩЕНИЯ
-# ============================================================
-
-@client.on(events.MessageEdited)
-async def handle_message_edit(event):
-    # Нас интересует только чат «Избранное» (чат с самим собой)
-    # и только сообщение с нужным ID.
-    #
-    # SAVED_CHAT_ID определяется при первоначальной загрузке.
-    if SAVED_CHAT_ID is not None and event.chat_id == SAVED_CHAT_ID:
-        if event.id == KEYWORDS_MESSAGE_ID:
-            # Если сообщение изменилось —
-            # заново читаем его содержимое.
-            await process_keywords_message(event.raw_text)
-
-# ============================================================
-# ПЕРВОНАЧАЛЬНАЯ ЗАГРУЗКА КЛЮЧЕВЫХ СЛОВ
-# ============================================================
-
-async def load_initial_keywords():
-    global SAVED_CHAT_ID
-    try:
-        # Получаем свой аккаунт.
-        # Его ID совпадает с ID чата «Избранное».
-        me = await client.get_me()
-        SAVED_CHAT_ID = me.id
-        print(f"Вошли как: {me.first_name} (id={me.id}, @{me.username})", flush=True)
-
-        # Читаем конкретное сообщение из «Избранного» по message_id.
-        msg = await client.get_messages("me", ids=KEYWORDS_MESSAGE_ID)
-
-        if msg is None:
-            print(f"Сообщение {KEYWORDS_MESSAGE_ID} НЕ СУЩЕСТВУЕТ в Избранном.", flush=True)
-            # Показываем последние сообщения, чтобы найти правильный ID.
-            async for m in client.iter_messages("me", limit=10):
-                preview = (m.raw_text or "[без текста]")[:40].replace("\n", " ")
-                print(f"  id={m.id} | {preview}", flush=True)
-        elif not msg.raw_text:
-            print(f"Сообщение {KEYWORDS_MESSAGE_ID} найдено, но в нём нет текста.", flush=True)
+        if not client.is_connected():
+            problems.append("Telegram")
         else:
-            # Сообщение существует и содержит текст —
-            # загружаем из него настройки и ключевые слова.
-            await process_keywords_message(msg.raw_text)
-
+            await asyncio.wait_for(client.get_me(), timeout=20)
     except Exception as e:
-        print(
-            f"Ошибка при считывании сообщения {KEYWORDS_MESSAGE_ID}: {e}",
-            flush=True
-        )
+        print(f"Health: Telegram err: {e}", flush=True)
+        problems.append("Telegram")
 
-# ============================================================
-# ЦИКЛ HEARTBEAT / ПУЛЬСА
-# ============================================================
+    # 2. База данных: смотрим итог последнего реального обращения
+    # (старт, команды), сами в БД не ходим.
+    if not DB_OK:
+        problems.append("БД")
+
+    # 3. Список слов не пуст (иначе уведомления не придут никогда).
+    if not KEYWORDS:
+        problems.append("нет слов")
+
+    # 4. API тревог отвечает (если мониторинг включён).
+    if ALERTS_API_TOKEN and BOT_SETTINGS.get("alerts", "on") != "off":
+        if time.time() - ALERTS_LAST_OK > 180:
+            problems.append("тревоги")
+
+    return problems
 
 async def heartbeat_loop():
     global CURRENT_TICK
-    global CURRENT_PULSE_COLOR
 
-    # Бесконечный цикл.
-    # Работает всё время, пока запущен Telethon.
+    # Состояние проверяется раз в 5 минут. Сообщение пульса обновляется
+    # раз в 10 минут, а при смене статуса (🟢 <-> 🔴) — сразу после проверки.
+    last_problems = None
+    checks_since_update = 0
+
     while True:
-        # Увеличиваем номер цикла.
-        CURRENT_TICK += 1
+        problems = await check_health()
 
-        # Если предыдущий цикл установил жёлтый цвет
-        # из-за изменения ключевых слов,
-        # при следующем обычном пульсе возвращаем зелёный.
-        if CURRENT_PULSE_COLOR == "🟡":
-            CURRENT_PULSE_COLOR = "🟢"
+        if problems != last_problems or checks_since_update >= 2:
+            CURRENT_TICK += 1
+            # Отправка идёт через requests, выносим из цикла событий.
+            await asyncio.to_thread(update_heartbeat, problems)
+            last_problems = problems
+            checks_since_update = 0
 
-        # Обновляем существующее сообщение пульса.
-        update_heartbeat()
+        checks_since_update += 1
+        await asyncio.sleep(300)
 
-        # Следующее обновление через 10 минут.
-        await asyncio.sleep(600)
+async def db_keepalive_loop():
+    # Первый запрос не нужен: при старте база уже читалась.
+    while True:
+        await asyncio.sleep(86400)
+        await asyncio.to_thread(db_ping)
 
 # ============================================================
-# ОТСЛЕЖИВАНИЕ НОВЫХ СООБЩЕНИЙ В ЦЕЛЕВЫХ КАНАЛАХ
+# КОМАНДЫ УПРАВЛЕНИЯ ИЗ ЧАТА С БОТОМ
+# ============================================================
+
+async def reply(text):
+    # Ответ отправляется от имени бота (через Bot API),
+    # поэтому приходит в тот же чат, где вы пишете команды.
+    await asyncio.to_thread(send_telegram_alert, text)
+
+def parse_word(arg):
+    # Слово можно передать в кавычках, чтобы сохранить пробелы по краям:
+    #   /add "на київ "
+    # Telegram сам обрезает пробелы в конце сообщения, поэтому без кавычек
+    # пробел в конце слова не сохранится.
+    if len(arg) >= 2 and arg[0] in "\"'" and arg[-1] == arg[0]:
+        word = arg[1:-1]
+    else:
+        word = arg.strip()
+    # Все слова хранятся в нижнем регистре, т.к. текст постов тоже приводится к нему.
+    return word.lower()
+
+HELP_TEXT = (
+    "📖 Команды:\n\n"
+    "/add слово — добавить ключевое слово\n"
+    '(в кавычках, если нужны пробелы по краям: /add "на київ ")\n\n'
+    "/del слово — удалить ключевое слово\n\n"
+    "/list — настройки и список слов\n\n"
+    "/alerts on | off — мониторинг воздушных тревог\n\n"
+    "/yellow silent | sound — жёлтые тревоги без звука / со звуком\n\n"
+    "/reload — перечитать данные из Supabase (после ручной правки таблиц)\n\n"
+    "/help — эта справка"
+)
+
+# outgoing=True — только сообщения, отправленные С ВАШЕГО аккаунта.
+# Если кто-то другой напишет боту, для вашей Telethon-сессии это входящее
+# сообщение, и сюда оно не попадёт. Так что команды доступны только вам.
+@client.on(events.NewMessage(outgoing=True))
+async def handle_my_commands(event):
+    global KEYWORDS
+    global BOT_SETTINGS
+
+    # Команды принимаются только в личном чате с ботом.
+    if event.chat_id != BOT_USER_ID:
+        return
+
+    text = event.raw_text
+
+    if text.startswith("/add "):
+        word = parse_word(text[5:])
+        if not word.strip():
+            await reply("❌ Пустое слово")
+            return
+        if await asyncio.to_thread(db_add_keyword, word):
+            new_keywords = await asyncio.to_thread(db_get_keywords)
+            if new_keywords is not None:
+                KEYWORDS = new_keywords
+            await reply(f'✅ Добавлено: "{word}"')
+        else:
+            await reply("❌ Ошибка добавления в БД")
+
+    elif text.startswith("/del "):
+        word = parse_word(text[5:])
+        deleted = await asyncio.to_thread(db_del_keyword, word)
+        if deleted is None:
+            await reply("❌ Ошибка удаления из БД")
+        elif deleted == 0:
+            await reply(f'⚠️ Не найдено: "{word}"')
+        else:
+            new_keywords = await asyncio.to_thread(db_get_keywords)
+            if new_keywords is not None:
+                KEYWORDS = new_keywords
+            await reply(f'🗑 Удалено: "{word}"')
+
+    elif text == "/list":
+        header = (
+            f"⚙️ Настройки:\nalerts = {BOT_SETTINGS.get('alerts', 'on')}\n"
+            f"yellow = {'silent' if yellow_is_silent() else 'sound'}\n\n"
+            f"🔑 Ключевые слова ({len(KEYWORDS)}):\n"
+        )
+        # Слова показываем в кавычках, чтобы были видны пробелы по краям.
+        lines = [f'• "{kw}"' for kw in KEYWORDS]
+
+        # Лимит Telegram — 4096 символов, поэтому режем на части.
+        chunks = []
+        current = header
+        for line in lines:
+            if len(current) + len(line) + 1 > 3800:
+                chunks.append(current)
+                current = ""
+            current += line + "\n"
+        chunks.append(current)
+
+        for chunk in chunks:
+            await reply(chunk)
+
+    elif text.startswith("/alerts "):
+        val = text[8:].strip().lower()
+        if val in ["on", "off"]:
+            if await asyncio.to_thread(db_set_setting, "alerts", val):
+                BOT_SETTINGS = {**BOT_SETTINGS, "alerts": val}
+                await reply(f"✅ Настройка alerts: {val}")
+            else:
+                await reply("❌ Ошибка записи в БД")
+        else:
+            await reply("❌ Используйте /alerts on или /alerts off")
+
+    elif text == "/yellow" or text.startswith("/yellow "):
+        val = text[7:].strip().lower()
+        if val in ["silent", "sound"]:
+            flag = "on" if val == "silent" else "off"
+            if await asyncio.to_thread(db_set_setting, "yellow_silent", flag):
+                BOT_SETTINGS = {**BOT_SETTINGS, "yellow_silent": flag}
+                if flag == "on":
+                    await reply("🔕 Жёлтые тревоги теперь приходят без звука")
+                else:
+                    await reply("🔔 Жёлтые тревоги теперь приходят со звуком")
+            else:
+                await reply("❌ Ошибка записи в БД")
+        else:
+            state = "без звука" if yellow_is_silent() else "со звуком"
+            await reply(
+                f"Сейчас жёлтые тревоги приходят {state}.\n"
+                "Используйте /yellow silent или /yellow sound"
+            )
+
+    elif text == "/help":
+        await reply(HELP_TEXT)
+
+    elif text == "/reload":
+        # Ручное перечитывание данных из Supabase
+        # (на случай, если вы правили таблицы напрямую).
+        new_keywords = await asyncio.to_thread(db_get_keywords)
+        new_settings = await asyncio.to_thread(db_get_settings)
+        if new_keywords is None or new_settings is None:
+            await reply("❌ Не удалось прочитать данные из БД")
+        else:
+            KEYWORDS = new_keywords
+            BOT_SETTINGS = new_settings
+            await reply(
+                f"🔄 Перечитано из БД: слов {len(KEYWORDS)}, "
+                f"alerts = {BOT_SETTINGS.get('alerts', 'on')}"
+            )
+
+# ============================================================
+# ОТСЛЕЖИВАНИЕ СООБЩЕНИЙ В КАНАЛАХ
 # ============================================================
 
 @client.on(events.NewMessage(chats=TARGET_CHANNELS))
 async def handle_new_message(event):
-    # Получаем текст нового сообщения.
     message_text = event.raw_text
-
-    # Переводим текст в нижний регистр,
-    # чтобы поиск не зависел от регистра букв.
     text_lower = message_text.lower()
 
-    # Проверяем наличие хотя бы одного ключевого слова.
-    #
-    # Если найдено совпадение — отправляем уведомление.
     if any(keyword in text_lower for keyword in KEYWORDS):
-        # Получаем информацию о канале.
         chat = await client.get_entity(event.chat_id)
-
-        # Сначала пытаемся получить обычный username.
-        #
-        # Если его нет — пробуем получить username
-        # из списка дополнительных usernames.
         username = (
             chat.username
             or (
@@ -554,63 +536,39 @@ async def handle_new_message(event):
                 else None
             )
         )
-
-        # Формируем обозначение канала.
-        #
-        # Если username существует: @channel
-        # Если username отсутствует: название канала.
         channel_id = (
             f"@{username}"
             if username
             else getattr(chat, 'title', 'Канал')
         )
-
-        # Формируем текст уведомления.
         alert_msg = f"▶ {channel_id}\n{message_text}"
-
-        # Отправляем уведомление в личный чат.
         send_telegram_alert(alert_msg)
 
 # ============================================================
-# ЗАПУСК TELETHON
+# ЗАПУСК
 # ============================================================
 
 async def start_telethon():
     print("Запуск Telethon...", flush=True)
     try:
-        # Подключаемся к Telegram.
         await client.start()
-        print("Telethon запущен!", flush=True)
+        me = await client.get_me()
+        print(f"Вошли как: {me.first_name} (id={me.id})", flush=True)
+        print(
+            f"Настройки: {BOT_SETTINGS} | Ключевые слова из БД ({len(KEYWORDS)} шт.)",
+            flush=True
+        )
+        if not KEYWORDS:
+            print("ВНИМАНИЕ: список ключевых слов пуст — уведомления приходить не будут.", flush=True)
 
-        # При запуске сначала читаем существующее
-        # сообщение с ключевыми словами из «Избранного».
-        await load_initial_keywords()
-
-        # Запускаем heartbeat в отдельной asyncio-задаче,
-        # чтобы он одновременно работал с обработчиками Telegram.
         asyncio.create_task(heartbeat_loop())
-
-        # Запускаем мониторинг воздушных тревог
         asyncio.create_task(alerts_monitoring_loop())
+        asyncio.create_task(db_keepalive_loop())
 
-        # Остаёмся подключёнными к Telegram
-        # до момента отключения клиента.
         await client.run_until_disconnected()
-
     except Exception as e:
         print(f"Telethon err: {e}", flush=True)
 
-# ============================================================
-# ГЛАВНАЯ ТОЧКА ЗАПУСКА
-# ============================================================
-
 if __name__ == "__main__":
-    # Flask запускается в отдельном daemon-потоке,
-    # чтобы одновременно работал Telegram-клиент.
-    threading.Thread(
-        target=run_flask,
-        daemon=True
-    ).start()
-
-    # Основной asyncio-цикл для Telethon.
+    threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(start_telethon())
