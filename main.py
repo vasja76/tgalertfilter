@@ -176,22 +176,30 @@ client = TelegramClient(
 HEARTBEAT_MESSAGE_ID = None
 # Время последнего успешного запроса к API тревог (для пульса).
 ALERTS_LAST_OK = time.time()
-CURRENT_TICK = 0
 
 # Числовой ID бота — начало токена до двоеточия.
-# Он же является chat_id личного чата с ботом в Telethon.
+# Он же chat_id личного чата с ботом в Telethon (откуда приходят команды).
 BOT_USER_ID = int(BOT_TOKEN.split(":")[0])
 
-def send_telegram_alert(text, silent=False):
+# ID вашего аккаунта. Ответы на команды отправляются сюда,
+# то есть в личный чат с ботом, а не в общую группу.
+# Заполняется при старте.
+ADMIN_CHAT_ID = None
+CURRENT_TICK = 0
+
+def send_telegram_alert(text, silent=False, chat_id=None):
+    # По умолчанию — в общий чат/канал (MY_TELEGRAM_ID).
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": MY_TELEGRAM_ID,
+        "chat_id": chat_id if chat_id is not None else MY_TELEGRAM_ID,
         "text": text
     }
     if silent:
         payload["disable_notification"] = True
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        if not res.ok:
+            print(f"Send fail: {res.text}", flush=True)
     except Exception as e:
         print(f"Send err: {e}", flush=True)
 
@@ -379,9 +387,12 @@ async def db_keepalive_loop():
 # ============================================================
 
 async def reply(text):
-    # Ответ отправляется от имени бота (через Bot API),
-    # поэтому приходит в тот же чат, где вы пишете команды.
-    await asyncio.to_thread(send_telegram_alert, text)
+    # Ответ уходит от имени бота (через Bot API) в ЛИЧНЫЙ чат с вами.
+    # В общую группу ответы никогда не попадают.
+    if ADMIN_CHAT_ID is None:
+        print("reply: ADMIN_CHAT_ID не определён, ответ не отправлен", flush=True)
+        return
+    await asyncio.to_thread(send_telegram_alert, text, False, ADMIN_CHAT_ID)
 
 def parse_word(arg):
     # Слово можно передать в кавычках, чтобы сохранить пробелы по краям:
@@ -419,7 +430,7 @@ async def handle_my_commands(event):
     if event.chat_id != BOT_USER_ID:
         return
 
-    text = event.raw_text
+    text = event.raw_text or ""
 
     if text.startswith("/add "):
         word = parse_word(text[5:])
@@ -549,10 +560,12 @@ async def handle_new_message(event):
 # ============================================================
 
 async def start_telethon():
+    global ADMIN_CHAT_ID
     print("Запуск Telethon...", flush=True)
     try:
         await client.start()
         me = await client.get_me()
+        ADMIN_CHAT_ID = me.id
         print(f"Вошли как: {me.first_name} (id={me.id})", flush=True)
         print(
             f"Настройки: {BOT_SETTINGS} | Ключевые слова из БД ({len(KEYWORDS)} шт.)",
