@@ -194,7 +194,22 @@ BOT_USER_ID = int(BOT_TOKEN.split(":")[0])
 # то есть в личный чат с ботом, а не в общую группу.
 # Заполняется при старте.
 ADMIN_CHAT_ID = None
-CURRENT_TICK = 0
+
+# Статус тревог для эмодзи пульса: None (отбой), "yellow" или "red".
+# Это худший статус среди отслеживаемых районов.
+PULSE_ALERT_LEVEL = None
+
+# Последний список проблем из проверки состояния. Нужен, чтобы цикл тревог
+# мог обновить пульс сразу при смене статуса, не дожидаясь проверки.
+LAST_HEALTH_PROBLEMS = []
+
+# Текст последнего пульса и блокировка: пульс обновляют два цикла.
+LAST_PULSE_TEXT = None
+HEARTBEAT_LOCK = threading.Lock()
+
+# Событие «первый опрос тревог выполнен» (создаётся при запуске).
+# Пульс при старте ждёт его, чтобы сразу показать правильный цвет.
+ALERTS_FIRST_POLL_DONE = None
 
 def send_telegram_alert(text, silent=False, chat_id=None):
     # По умолчанию — в общий чат/канал (MY_TELEGRAM_ID).
@@ -222,6 +237,17 @@ WATCHED_DISTRICTS = [
     {"key": "kyiv", "name": "Київ", "uid": 31, "title_part": "м. київ"},
     {"key": "fastiv", "name": "Фастівський р-н", "uid": 77, "title_part": "фастів"},
 ]
+
+# Опасность статуса: чем больше число, тем хуже.
+DANGER = {None: 0, "yellow": 1, "red": 2}
+
+def worst_level(current):
+    # Худший статус среди районов: None, "yellow" или "red".
+    worst = None
+    for level in current.values():
+        if DANGER.get(level, 0) > DANGER.get(worst, 0):
+            worst = level
+    return worst
 
 def api_requests_last_minute():
     now = time.time()
@@ -282,6 +308,7 @@ def build_alert_messages(changes):
 async def alerts_monitoring_loop():
     global ALERTS_LAST_OK
     global ALERTS_CLIENT
+    global PULSE_ALERT_LEVEL
     if not ALERTS_API_TOKEN:
         print("ALERTS_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
         return
@@ -294,6 +321,8 @@ async def alerts_monitoring_loop():
         if BOT_SETTINGS.get("alerts", "on") == "off":
             # Пока мониторинг выключен, не считаем это поломкой.
             ALERTS_LAST_OK = time.time()
+            if ALERTS_FIRST_POLL_DONE is not None:
+                ALERTS_FIRST_POLL_DONE.set()
             await asyncio.sleep(10)
             continue
 
@@ -314,7 +343,22 @@ async def alerts_monitoring_loop():
             for text, silent in build_alert_messages(changes):
                 send_telegram_alert(text, silent=silent)
 
+            # Пульс: эмодзи = худший текущий статус. Сообщение редактируется,
+            # если какой-то район стал опаснее или изменился общий статус
+            # (в том числе когда оба района перешли в отбой).
+            new_level = worst_level(current)
+            escalated = any(
+                DANGER.get(current[k], 0) > DANGER.get(last_status[k], 0)
+                for k in current
+            )
+            if escalated or new_level != PULSE_ALERT_LEVEL:
+                PULSE_ALERT_LEVEL = new_level
+                await asyncio.to_thread(update_heartbeat, LAST_HEALTH_PROBLEMS)
+
             last_status.update(current)
+
+            if ALERTS_FIRST_POLL_DONE is not None:
+                ALERTS_FIRST_POLL_DONE.set()
         except Exception as e:
             print(f"Alerts API err: {e}", flush=True)
 
@@ -324,17 +368,39 @@ async def alerts_monitoring_loop():
 # ПУЛЬС / HEARTBEAT
 # ============================================================
 
+PULSE_EMOJI = {None: "🟢", "yellow": "🟡", "red": "🔴"}
+
 def update_heartbeat(problems=None):
+    # Пульс обновляют два места (цикл проверки и цикл тревог),
+    # поэтому обновление идёт под блокировкой.
+    with HEARTBEAT_LOCK:
+        _update_heartbeat(problems)
+
+def _update_heartbeat(problems=None):
     global HEARTBEAT_MESSAGE_ID
+    global LAST_PULSE_TEXT
 
     now_kyiv = (
         datetime.now(timezone.utc) + timedelta(hours=2)
     ).strftime("%H:%M")
 
     if problems:
-        text = f"🔴 {now_kyiv} ({CURRENT_TICK}) · {', '.join(problems)}"
+        # Есть проблемы: в сообщении только их список, например «БД, Telegram».
+        text = ", ".join(problems)
     else:
-        text = f"🟢 {now_kyiv} ({CURRENT_TICK})"
+        # Всё в порядке: эмодзи статуса тревог + время.
+        # Если мониторинг тревог выключен (/alerts off) или не настроен —
+        # серый кружок вместо статуса.
+        if BOT_SETTINGS.get("alerts", "on") == "off" or not ALERTS_API_TOKEN:
+            emoji = "⚪"
+        else:
+            emoji = PULSE_EMOJI.get(PULSE_ALERT_LEVEL, "🟢")
+        text = f"{emoji} {now_kyiv}"
+
+    # Если текст не изменился (например, два обновления в одну минуту),
+    # Telegram ответил бы «message is not modified» — просто пропускаем.
+    if HEARTBEAT_MESSAGE_ID is not None and text == LAST_PULSE_TEXT:
+        return
 
     if HEARTBEAT_MESSAGE_ID is None:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -347,6 +413,7 @@ def update_heartbeat(problems=None):
             res = requests.post(url, json=payload, timeout=10).json()
             if res.get("ok"):
                 HEARTBEAT_MESSAGE_ID = res["result"]["message_id"]
+                LAST_PULSE_TEXT = text
                 try:
                     requests.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/unpinAllChatMessages",
@@ -376,7 +443,10 @@ def update_heartbeat(problems=None):
         }
         try:
             res = requests.post(url, json=payload, timeout=10).json()
-            if not res.get("ok"):
+            if res.get("ok") or "not modified" in str(res.get("description", "")):
+                LAST_PULSE_TEXT = text
+            else:
+                # Сообщение недоступно (например, удалено) — создадим новое.
                 HEARTBEAT_MESSAGE_ID = None
         except Exception as e:
             print(f"Pulse err: {e}", flush=True)
@@ -412,18 +482,27 @@ async def check_health():
     return problems
 
 async def heartbeat_loop():
-    global CURRENT_TICK
+    global LAST_HEALTH_PROBLEMS
+
+    # При запуске ждём первый опрос тревог (не дольше 30 секунд), чтобы
+    # первое закреплённое сообщение сразу показало правильный цвет.
+    if ALERTS_API_TOKEN and BOT_SETTINGS.get("alerts", "on") != "off":
+        try:
+            await asyncio.wait_for(ALERTS_FIRST_POLL_DONE.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
 
     # Состояние проверяется раз в 5 минут. Сообщение пульса обновляется
-    # раз в 10 минут, а при смене статуса (🟢 <-> 🔴) — сразу после проверки.
+    # раз в 10 минут, а при смене набора проблем — сразу после проверки.
+    # Смена статуса тревог обновляет пульс отдельно (в цикле тревог).
     last_problems = None
     checks_since_update = 0
 
     while True:
         problems = await check_health()
+        LAST_HEALTH_PROBLEMS = problems
 
         if problems != last_problems or checks_since_update >= 2:
-            CURRENT_TICK += 1
             # Отправка идёт через requests, выносим из цикла событий.
             await asyncio.to_thread(update_heartbeat, problems)
             last_problems = problems
@@ -543,6 +622,8 @@ async def handle_my_commands(event):
         if val in ["on", "off"]:
             if await asyncio.to_thread(db_set_setting, "alerts", val):
                 BOT_SETTINGS = {**BOT_SETTINGS, "alerts": val}
+                # Пульс меняется сразу: ⚪ при off, статус тревог при on.
+                await asyncio.to_thread(update_heartbeat, LAST_HEALTH_PROBLEMS)
                 await reply(f"✅ Настройка alerts: {val}")
             else:
                 await reply("❌ Ошибка записи в БД")
@@ -601,6 +682,7 @@ async def handle_my_commands(event):
         else:
             KEYWORDS = new_keywords
             BOT_SETTINGS = new_settings
+            await asyncio.to_thread(update_heartbeat, LAST_HEALTH_PROBLEMS)
             await reply(
                 f"🔄 Перечитано из БД: слов {len(KEYWORDS)}, "
                 f"alerts = {BOT_SETTINGS.get('alerts', 'on')}"
@@ -639,6 +721,7 @@ async def handle_new_message(event):
 
 async def start_telethon():
     global ADMIN_CHAT_ID
+    global ALERTS_FIRST_POLL_DONE
     print("Запуск Telethon...", flush=True)
     try:
         await client.start()
@@ -652,6 +735,7 @@ async def start_telethon():
         if not KEYWORDS:
             print("ВНИМАНИЕ: список ключевых слов пуст — уведомления приходить не будут.", flush=True)
 
+        ALERTS_FIRST_POLL_DONE = asyncio.Event()
         asyncio.create_task(heartbeat_loop())
         asyncio.create_task(alerts_monitoring_loop())
         asyncio.create_task(db_keepalive_loop())
