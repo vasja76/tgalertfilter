@@ -48,9 +48,10 @@ supabase: Client = (
 if not supabase:
     print("ВНИМАНИЕ: SUPABASE_URL/SUPABASE_KEY не заданы, список слов будет пустым!", flush=True)
 
-# yellow_silent = on  -> сообщения о жёлтой тревоге приходят без звука
-# (красные тревоги и «Відбій» всегда со звуком)
-DEFAULT_SETTINGS = {"alerts": "on", "yellow_silent": "off"}
+# silent = on  -> тихий режим: без звука приходят «Відбій», жёлтые тревоги
+# и сообщения со словами, помеченными как «тихие» (колонка quiet).
+# Красные тревоги всегда со звуком.
+DEFAULT_SETTINGS = {"alerts": "on", "silent": "off"}
 
 # Результат ПОСЛЕДНЕГО реального обращения к БД (старт, команды).
 # Пульс только читает этот флаг и сам в БД не ходит.
@@ -81,28 +82,48 @@ def db_get_settings():
         return None
 
 def db_get_keywords():
+    # Возвращает (список слов, множество «тихих» слов) или None при ошибке.
     if not supabase:
-        return []
+        return [], set()
     try:
-        res = supabase.table("keywords").select("word").execute()
+        try:
+            res = supabase.table("keywords").select("word, quiet").execute()
+        except Exception as e:
+            # Колонки quiet ещё нет (не выполнен SQL) — читаем только слова,
+            # чтобы бот продолжал присылать уведомления.
+            print(f"DB keywords: колонка quiet недоступна ({e}), все слова обычные", flush=True)
+            res = supabase.table("keywords").select("word").execute()
         _db_ok(True)
-        # Пустые слова отбрасываем: "" содержится в любой строке
-        # и бот реагировал бы на каждое сообщение.
-        return [
-            row["word"].lower()
-            for row in res.data
-            if row.get("word") and row["word"].strip()
-        ]
+        words = []
+        quiet = set()
+        for row in res.data:
+            word = row.get("word") or ""
+            # Пустые слова отбрасываем: "" содержится в любой строке
+            # и бот реагировал бы на каждое сообщение.
+            if not word.strip():
+                continue
+            word = word.lower()
+            words.append(word)
+            if row.get("quiet"):
+                quiet.add(word)
+        return words, quiet
     except Exception as e:
         print(f"DB keywords err: {e}", flush=True)
         _db_ok(False)
         return None
 
-def db_add_keyword(word):
+def db_add_keyword(word, quiet=None):
+    # quiet=None  — колонку quiet не трогаем (новое обычное слово
+    #               или уже существующее с прежней пометкой);
+    # quiet=True/False — записываем пометку (для существующего слова
+    #               это перезаписывает её).
     if not supabase:
         return False
     try:
-        supabase.table("keywords").upsert({"word": word}, on_conflict="word").execute()
+        payload = {"word": word}
+        if quiet is not None:
+            payload["quiet"] = quiet
+        supabase.table("keywords").upsert(payload, on_conflict="word").execute()
         _db_ok(True)
         return True
     except Exception as e:
@@ -153,11 +174,12 @@ def db_ping():
 # ГЛОБАЛЬНЫЕ СОСТОЯНИЯ
 # ============================================================
 
-KEYWORDS = db_get_keywords() or []
+_initial_keywords = db_get_keywords()
+KEYWORDS, QUIET_KEYWORDS = _initial_keywords if _initial_keywords is not None else ([], set())
 BOT_SETTINGS = db_get_settings() or dict(DEFAULT_SETTINGS)
 
-def yellow_is_silent():
-    return BOT_SETTINGS.get("yellow_silent", "off") == "on"
+def silent_mode():
+    return BOT_SETTINGS.get("silent", "off") == "on"
 
 TARGET_CHANNELS = [
     "@war_monitor",
@@ -299,10 +321,10 @@ def build_alert_messages(changes):
         if level == "red":
             messages.append((f"🔴 Тривога {joined} / Червоний рівень", False))
         elif level == "yellow":
-            messages.append((f"🟡 Тривога {joined} / Жовтий рівень", yellow_is_silent()))
+            messages.append((f"🟡 Тривога {joined} / Жовтий рівень", silent_mode()))
         elif level is None:
-            # Відбій всегда со звуком.
-            messages.append((f"🟢 Відбій {joined}", False))
+            # Відбій без звука только в тихом режиме.
+            messages.append((f"🟢 Відбій {joined}", silent_mode()))
     return messages
 
 async def alerts_monitoring_loop():
@@ -541,14 +563,27 @@ def parse_word(arg):
     # Все слова хранятся в нижнем регистре, т.к. текст постов тоже приводится к нему.
     return word.lower()
 
+async def refresh_keywords():
+    # Перечитывает слова и «тихие» пометки из БД. False — если БД недоступна
+    # (тогда в памяти остаётся прежний список).
+    global KEYWORDS
+    global QUIET_KEYWORDS
+    data = await asyncio.to_thread(db_get_keywords)
+    if data is None:
+        return False
+    KEYWORDS, QUIET_KEYWORDS = data
+    return True
+
 HELP_TEXT = (
     "📖 Команды:\n\n"
     "/add слово — добавить ключевое слово\n"
     '(в кавычках, если нужны пробелы по краям: /add "на київ ")\n\n'
-    "/del слово — удалить ключевое слово\n\n"
+    "/addsilent слово — добавить слово 🔕: в тихом режиме приходит без звука\n"
+    "(если слово уже есть, /add и /addsilent меняют его пометку)\n\n"
+    "/del слово — удалить слово\n\n"
     "/list — настройки и список слов\n\n"
     "/alerts on | off — мониторинг воздушных тревог\n\n"
-    "/yellow silent | sound — жёлтые тревоги без звука / со звуком\n\n"
+    "/silent on | off — тихий режим: отбои, жёлтые тревоги и слова с пометкой 🔕 приходят без звука\n\n"
     "/now — статус тревог прямо сейчас (внеочередной запрос)\n\n"
     "/reload — перечитать данные из Supabase (после ручной правки таблиц)\n\n"
     "/help — эта справка"
@@ -560,6 +595,7 @@ HELP_TEXT = (
 @client.on(events.NewMessage(outgoing=True))
 async def handle_my_commands(event):
     global KEYWORDS
+    global QUIET_KEYWORDS
     global BOT_SETTINGS
     global ALERTS_LAST_OK
 
@@ -569,18 +605,40 @@ async def handle_my_commands(event):
 
     text = event.raw_text or ""
 
-    if text.startswith("/add "):
-        word = parse_word(text[5:])
+    if text.startswith("/add ") or text.startswith("/addsilent "):
+        # /add — слово со звуком, /addsilent — слово 🔕 (без звука в тихом режиме).
+        # Если слово уже есть, команда меняет его пометку.
+        quiet = text.startswith("/addsilent ")
+        word = parse_word(text[11:] if quiet else text[5:])
         if not word.strip():
             await reply("❌ Пустое слово")
             return
-        if await asyncio.to_thread(db_add_keyword, word):
-            new_keywords = await asyncio.to_thread(db_get_keywords)
-            if new_keywords is not None:
-                KEYWORDS = new_keywords
-            await reply(f'✅ Добавлено: "{word}"')
+
+        exists = word in KEYWORDS
+        was_quiet = word in QUIET_KEYWORDS
+
+        if exists and quiet == was_quiet:
+            state = "без звука 🔕" if was_quiet else "со звуком"
+            await reply(f'ℹ️ Уже есть ({state}), без изменений: "{word}"')
+            return
+
+        # Новое обычное слово: колонку quiet не трогаем.
+        # Иначе пишем пометку явно (для существующего слова это смена пометки).
+        flag = True if quiet else (False if was_quiet else None)
+
+        if await asyncio.to_thread(db_add_keyword, word, flag):
+            await refresh_keywords()
+            if not exists and quiet:
+                await reply(f'🔕 Добавлено без звука: "{word}"')
+            elif not exists:
+                await reply(f'✅ Добавлено: "{word}"')
+            elif quiet:
+                await reply(f'🔕 Теперь без звука: "{word}"')
+            else:
+                await reply(f'🔔 Теперь со звуком: "{word}"')
         else:
-            await reply("❌ Ошибка добавления в БД")
+            hint = " (есть ли в таблице keywords колонка quiet?)" if flag is not None else ""
+            await reply("❌ Ошибка записи в БД" + hint)
 
     elif text.startswith("/del "):
         word = parse_word(text[5:])
@@ -590,19 +648,19 @@ async def handle_my_commands(event):
         elif deleted == 0:
             await reply(f'⚠️ Не найдено: "{word}"')
         else:
-            new_keywords = await asyncio.to_thread(db_get_keywords)
-            if new_keywords is not None:
-                KEYWORDS = new_keywords
+            await refresh_keywords()
             await reply(f'🗑 Удалено: "{word}"')
 
     elif text == "/list":
         header = (
             f"⚙️ Настройки:\nalerts = {BOT_SETTINGS.get('alerts', 'on')}\n"
-            f"yellow = {'silent' if yellow_is_silent() else 'sound'}\n\n"
+            f"silent = {'on' if silent_mode() else 'off'}\n\n"
             f"🔑 Ключевые слова ({len(KEYWORDS)}):\n"
         )
+        if QUIET_KEYWORDS:
+            header += "(🔕 — без звука в тихом режиме)\n"
         # Слова показываем в кавычках, чтобы были видны пробелы по краям.
-        lines = [f'• "{kw}"' for kw in KEYWORDS]
+        lines = [f'• "{kw}"' + (" 🔕" if kw in QUIET_KEYWORDS else "") for kw in KEYWORDS]
 
         # Лимит Telegram — 4096 символов, поэтому режем на части.
         chunks = []
@@ -630,23 +688,25 @@ async def handle_my_commands(event):
         else:
             await reply("❌ Используйте /alerts on или /alerts off")
 
-    elif text == "/yellow" or text.startswith("/yellow "):
+    elif text == "/silent" or text.startswith("/silent "):
         val = text[7:].strip().lower()
-        if val in ["silent", "sound"]:
-            flag = "on" if val == "silent" else "off"
-            if await asyncio.to_thread(db_set_setting, "yellow_silent", flag):
-                BOT_SETTINGS = {**BOT_SETTINGS, "yellow_silent": flag}
-                if flag == "on":
-                    await reply("🔕 Жёлтые тревоги теперь приходят без звука")
+        if val in ["on", "off"]:
+            if await asyncio.to_thread(db_set_setting, "silent", val):
+                BOT_SETTINGS = {**BOT_SETTINGS, "silent": val}
+                if val == "on":
+                    await reply(
+                        "🔕 Тихий режим включён.\n"
+                        "Без звука: отбои, жёлтые тревоги и слова с пометкой 🔕."
+                    )
                 else:
-                    await reply("🔔 Жёлтые тревоги теперь приходят со звуком")
+                    await reply("🔔 Тихий режим выключен. Всё приходит со звуком.")
             else:
                 await reply("❌ Ошибка записи в БД")
         else:
-            state = "без звука" if yellow_is_silent() else "со звуком"
+            state = "включён" if silent_mode() else "выключен"
             await reply(
-                f"Сейчас жёлтые тревоги приходят {state}.\n"
-                "Используйте /yellow silent или /yellow sound"
+                f"Тихий режим сейчас {state}.\n"
+                "Используйте /silent on или /silent off"
             )
 
     elif text == "/now":
@@ -680,7 +740,7 @@ async def handle_my_commands(event):
         if new_keywords is None or new_settings is None:
             await reply("❌ Не удалось прочитать данные из БД")
         else:
-            KEYWORDS = new_keywords
+            KEYWORDS, QUIET_KEYWORDS = new_keywords
             BOT_SETTINGS = new_settings
             await asyncio.to_thread(update_heartbeat, LAST_HEALTH_PROBLEMS)
             await reply(
@@ -697,7 +757,9 @@ async def handle_new_message(event):
     message_text = event.raw_text
     text_lower = message_text.lower()
 
-    if any(keyword in text_lower for keyword in KEYWORDS):
+    matched = [kw for kw in KEYWORDS if kw in text_lower]
+
+    if matched:
         chat = await client.get_entity(event.chat_id)
         username = (
             chat.username
@@ -713,7 +775,12 @@ async def handle_new_message(event):
             else getattr(chat, 'title', 'Канал')
         )
         alert_msg = f"▶ {channel_id}\n{message_text}"
-        send_telegram_alert(alert_msg)
+
+        # В тихом режиме без звука приходят только сообщения, где ВСЕ найденные
+        # слова помечены как «тихие». Если есть хотя бы одно обычное слово —
+        # сообщение приходит со звуком.
+        silent = silent_mode() and all(kw in QUIET_KEYWORDS for kw in matched)
+        send_telegram_alert(alert_msg, silent=silent)
 
 # ============================================================
 # ЗАПУСК
