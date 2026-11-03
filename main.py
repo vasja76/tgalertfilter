@@ -2,6 +2,19 @@
 ТРЕФИ — Telegram-бот: следит за каналами и воздушными тревогами.
 
 ======================================================================
+ВЕРСИЯ
+======================================================================
+Текущая версия — константа VERSION в разделе 3 (её видно в логе при запуске
+и в /help). Как менять номер:
+    * цифры после точки: +1 при каждой правке кода;
+    * цифра до точки: только при существенных изменениях;
+    * в скобках: дата правки в формате ГГГГММДД.
+История:
+    5.03 (20261103)  подробные комментарии, список слов по умолчанию на случай
+                     отказа БД, регионы одной таблицей в коде
+    5.xx             слова и настройки перенесены в Supabase (основная версия 5)
+
+======================================================================
 ЧТО ДЕЛАЕТ БОТ
 ======================================================================
 1. КЛЮЧЕВЫЕ СЛОВА. Читает каналы из TARGET_CHANNELS (через ваш аккаунт,
@@ -22,6 +35,11 @@
 Бот читает их при запуске и держит копию в памяти (KEYWORDS, BOT_SETTINGS).
 Команды из Telegram меняют и базу, и память. Если вы правили таблицы
 вручную в панели Supabase, отправьте боту /reload.
+
+В КОДЕ (раздел 3) задаются: каналы для слежения (TARGET_CHANNELS), районы
+тревог (REGIONS) и запасной список слов (DEFAULT_KEYWORDS). Если Supabase
+недоступен при запуске, бот работает на запасном списке слов и раз в 5 минут
+пробует подключиться к базе заново; в пульсе при этом написано «БД».
 
 SQL для создания таблиц (выполняется один раз в Supabase -> SQL Editor):
 
@@ -116,6 +134,9 @@ def run_flask():
 # ============================================================
 # 3. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ
 # ============================================================
+# Версия бота (правила изменения номера: см. «ВЕРСИЯ» в начале файла).
+VERSION = "5.03 (20261103)"
+
 # Переменные окружения задаются на Render (Environment). В коде их менять
 # не нужно.
 
@@ -142,17 +163,81 @@ TARGET_CHANNELS = [
     "@war_monitor",
     "@kievreal1",
     "@truexanewsua",
+    # "@tgalertfilter",   # ОТКЛЮЧЁН (в прежних версиях тоже был закомментирован).
+    #                     # Если это ваш собственный канал, включать нельзя: бот
+    #                     # читал бы свои же сообщения и мог бы зациклиться.
 ]
 
-# Районы, за которыми следим на карте тревог.
-#   key        — внутреннее имя (по порядку здесь строится пульс: Київ, район)
-#   name       — как район называется в сообщениях
-#   uid        — код региона в API alerts.in.ua
-#   title_part — запасной поиск по названию, если код вдруг не совпадёт
-WATCHED_DISTRICTS = [
-    {"key": "kyiv", "name": "Київ", "uid": 31, "title_part": "м. київ"},
-    {"key": "fastiv", "name": "Фастівський р-н", "uid": 77, "title_part": "фастів"},
+# ЗАПАСНОЙ список ключевых слов. Основной список хранится в Supabase;
+# этот используется, только если база недоступна при запуске бота.
+# Все слова в нижнем регистре. Пробел или «!» на конце слова важны:
+# "на київ!" и "на київ" — разные слова. Слова-комментарии отключены.
+DEFAULT_KEYWORDS = [
+    "загроза балістики",
+    "балістична загроза",
+    "київ — спуск балістики",
+    "київ - спуск балістики",
+    "нивки",
+    "нивок",
+    "нивка",
+    "онікс—м",
+    "онікс-м",
+    "циркони київ",
+    "циркон київ",
+    "циркон — київ",
+    "на київ циркони",
+    "циркони на київ",
+    "вихід циркон",
+    "київ кр",
+    "кр київ",
+    "зліт міг",
+    "кинджал",
+    "на київ!",
+    "вектор київ!",
+    # Отключённые слова из прежних версий:
+    # "на київ ",
+    # "далі київ ",
+    # "на столицю",
+    # "вектор київ ",
+    # "у київ ",
+    # "до києва",
 ]
+
+# РАЙОНЫ, за которыми следит бот (обычно два). Чтобы сменить район,
+# поправьте эту таблицу и задеплойте код.
+# Формат строки:  (номер региона, "название", "запасной поиск")
+#   номер региона  — location_uid из API alerts.in.ua (Київ = 31)
+#   название       — как район назван в сообщениях о тревогах
+#   запасной поиск — НЕобязательно: часть названия из API строчными буквами;
+#                    срабатывает, если номер вдруг не совпал.
+#                    Можно не указывать, например: (31, "Київ")
+# Порядок важен: первый район — первый значок в пульсе.
+REGIONS = [
+    (31, "Київ", "м. київ"),
+    (77, "Фастівський р-н", "фастів"),
+]
+
+
+def _build_districts(regions):
+    """Превращает таблицу REGIONS в список словарей, с которыми работает код.
+
+    key        — внутреннее имя района ("r31"), по нему хранится статус
+    name       — название для сообщений
+    uid        — номер региона в API
+    title_part — запасной поиск по названию ("" — не используется)"""
+    districts = []
+    for uid, name, *rest in regions:
+        districts.append({
+            "key": f"r{uid}",
+            "name": name,
+            "uid": int(uid),
+            "title_part": rest[0].lower() if rest else "",
+        })
+    return districts
+
+
+# Готовый список районов, который используют остальные разделы кода.
+WATCHED_DISTRICTS = _build_districts(REGIONS)
 
 # Настройки по умолчанию (используются, пока в таблице нет своей строки).
 #   alerts: on | off — мониторинг тревог
@@ -187,7 +272,7 @@ supabase: Client = (
     if SUPABASE_URL and SUPABASE_KEY else None
 )
 if not supabase:
-    print("ВНИМАНИЕ: SUPABASE_URL/SUPABASE_KEY не заданы, список слов будет пустым!", flush=True)
+    print("ВНИМАНИЕ: SUPABASE_URL/SUPABASE_KEY не заданы, бот работает на запасном списке слов.", flush=True)
 
 # Результат ПОСЛЕДНЕГО реального обращения к БД (старт, команды, суточный
 # запрос). Пульс только читает этот флаг и сам в базу не ходит.
@@ -230,6 +315,10 @@ def db_get_keywords():
         try:
             res = supabase.table("keywords").select("word, quiet").execute()
         except Exception as e:
+            # Если ошибка не про колонку quiet (например, БД недоступна),
+            # передаём её дальше: сработает общий обработчик ниже.
+            if "quiet" not in str(e):
+                raise
             # Колонки quiet ещё нет (не выполнен SQL): читаем только слова,
             # чтобы бот продолжал присылать уведомления.
             print(f"DB keywords: колонка quiet недоступна ({e}), все слова обычные", flush=True)
@@ -333,11 +422,21 @@ def db_ping():
 
 # --- Данные из БД (загружаются один раз при старте файла) ---
 _initial_keywords = db_get_keywords()
+_initial_settings = db_get_settings()
+
+# USING_FALLBACK = True: БД не ответила при запуске, бот работает на запасном
+# списке слов (DEFAULT_KEYWORDS) и настройках по умолчанию. Пока флаг
+# поднят, heartbeat_loop раз в 5 минут пробует прочитать БД заново.
+USING_FALLBACK = (not supabase) or _initial_keywords is None or _initial_settings is None
+
 # KEYWORDS        — список всех ключевых слов (нижний регистр)
 # QUIET_KEYWORDS  — те из них, что помечены 🔕 (без звука в тихом режиме)
-KEYWORDS, QUIET_KEYWORDS = _initial_keywords if _initial_keywords is not None else ([], set())
+if (not supabase) or _initial_keywords is None:
+    KEYWORDS, QUIET_KEYWORDS = list(DEFAULT_KEYWORDS), set()
+else:
+    KEYWORDS, QUIET_KEYWORDS = _initial_keywords
 # BOT_SETTINGS — настройки: {"alerts": "on", "silent": "off", ...}
-BOT_SETTINGS = db_get_settings() or dict(DEFAULT_SETTINGS)
+BOT_SETTINGS = _initial_settings or dict(DEFAULT_SETTINGS)
 
 # --- Тревоги ---
 ALERTS_CLIENT = None            # клиент API тревог (создаётся в цикле тревог, им же пользуется /now)
@@ -349,7 +448,7 @@ ALERTS_FIRST_POLL_DONE = None   # событие «первый опрос вы�
 HEARTBEAT_MESSAGE_ID = None     # ID закреплённого сообщения (None — ещё не создано)
 LAST_PULSE_TEXT = None          # текст, который сейчас показан в пульсе
 HEARTBEAT_LOCK = threading.Lock()   # пульс обновляют два цикла: блокировка исключает дубли
-PULSE_LEVELS = {}               # статус районов в пульсе: {"kyiv": None|"yellow"|"red", ...}
+PULSE_LEVELS = {}               # статус районов в пульсе: {"r31": None|"yellow"|"red", ...}
 LAST_HEALTH_PROBLEMS = []       # список проблем из последней проверки здоровья
 
 # --- Команды ---
@@ -564,8 +663,9 @@ def compute_current_status(active_alerts):
         uid = int(alert.location_uid) if alert.location_uid else 0
         title = (alert.location_title or "").lower()
         for d in WATCHED_DISTRICTS:
-            # Район находим по коду, а если не совпал, то по названию.
-            if uid == d["uid"] or d["title_part"] in title:
+            # Район находим по коду, а если не совпал, то по названию
+            # (если запасной поиск задан: пустая строка нашла бы любой район).
+            if uid == d["uid"] or (d["title_part"] and d["title_part"] in title):
                 current[d["key"]] = alert.alert_level
                 break
     return current
@@ -803,6 +903,25 @@ async def check_health():
     return problems
 
 
+async def try_recover_from_db():
+    """Пока бот работает на запасных данных (USING_FALLBACK), пробует прочитать
+    слова и настройки из БД. Когда получилось, переходит на данные из БД."""
+    global KEYWORDS
+    global QUIET_KEYWORDS
+    global BOT_SETTINGS
+    global USING_FALLBACK
+
+    keywords = await asyncio.to_thread(db_get_keywords)
+    settings = await asyncio.to_thread(db_get_settings)
+    if keywords is None or settings is None:
+        return      # БД всё ещё недоступна, попробуем при следующей проверке
+
+    KEYWORDS, QUIET_KEYWORDS = keywords
+    BOT_SETTINGS = settings
+    USING_FALLBACK = False
+    print(f"БД снова доступна: загружено слов {len(KEYWORDS)}", flush=True)
+
+
 async def heartbeat_loop():
     """Цикл пульса: проверка состояния раз в 5 минут, обновление
     сообщения при смене проблем и в любом случае раз в 10 минут (чтобы время
@@ -822,6 +941,10 @@ async def heartbeat_loop():
     checks_since_update = 0     # сколько проверок прошло с последнего обновления
 
     while True:
+        # Если бот стартовал без БД, пробуем подключиться к ней заново.
+        if USING_FALLBACK and supabase:
+            await try_recover_from_db()
+
         problems = await check_health()
         LAST_HEALTH_PROBLEMS = problems     # запоминаем для цикла тревог и команд
 
@@ -891,7 +1014,7 @@ async def refresh_keywords():
 
 # Текст справки /help.
 HELP_TEXT = (
-    "📖 Команды:\n\n"
+    f"📖 Команды (версия {VERSION}):\n\n"
     "/add слово — добавить ключевое слово\n"
     '(в кавычках, если нужны пробелы по краям: /add "на київ ")\n\n'
     "/addsilent слово — добавить слово 🔕: в тихом режиме приходит без звука\n"
@@ -1066,6 +1189,7 @@ async def cmd_reload():
     global KEYWORDS
     global QUIET_KEYWORDS
     global BOT_SETTINGS
+    global USING_FALLBACK
     new_keywords = await asyncio.to_thread(db_get_keywords)
     new_settings = await asyncio.to_thread(db_get_settings)
     if new_keywords is None or new_settings is None:
@@ -1073,6 +1197,7 @@ async def cmd_reload():
         return
     KEYWORDS, QUIET_KEYWORDS = new_keywords
     BOT_SETTINGS = new_settings
+    USING_FALLBACK = False      # данные теперь из БД, а не запасные
     # Настройка alerts могла измениться: обновляем пульс.
     await asyncio.to_thread(update_heartbeat, LAST_HEALTH_PROBLEMS)
     await reply(
@@ -1153,7 +1278,7 @@ async def start_telethon():
     global ADMIN_CHAT_ID
     global ALERTS_FIRST_POLL_DONE
 
-    print("Запуск Telethon...", flush=True)
+    print(f"Запуск Telethon... Версия {VERSION}", flush=True)
     try:
         await client.start()                # вход по SESSION_STRING
         me = await client.get_me()
@@ -1163,6 +1288,9 @@ async def start_telethon():
             f"Настройки: {BOT_SETTINGS} | Ключевые слова из БД ({len(KEYWORDS)} шт.)",
             flush=True
         )
+        if USING_FALLBACK:
+            print("ВНИМАНИЕ: БД недоступна при запуске, работаем на запасном списке слов "
+                  "(DEFAULT_KEYWORDS). Раз в 5 минут пробуем подключиться снова.", flush=True)
         if not KEYWORDS:
             print("ВНИМАНИЕ: список ключевых слов пуст — уведомления приходить не будут.", flush=True)
 
