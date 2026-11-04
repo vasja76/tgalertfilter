@@ -10,6 +10,7 @@
     * цифра до точки: только при существенных изменениях;
     * в скобках: дата правки в формате ГГГГММДД.
 История:
+    5.05 (20261104)  слово с # в начале отключено (как закомментированное)
     5.04 (20261103)  слова-исключения (/addstop), любые типографские кавычки
                      в командах (iPhone ставит «ёлочки»)
     5.03 (20261103)  подробные комментарии, список слов по умолчанию на случай
@@ -26,6 +27,10 @@
    убрать ложные срабатывания. Например, исключение «київщин» не даёт слову
    «ціль на київ» сработать на «ціль на київщину», а в «ціль на київ і на
    київщину» слово по-прежнему найдётся. Пост приходит в исходном виде.
+   ОТКЛЮЧЕНИЕ: слово (или исключение), начинающееся с «#», бот пропускает,
+   как закомментированное. Оно остаётся в таблице, пометки сохраняются.
+   Отключить/включить: дописать/убрать «#» в панели Supabase и отправить
+   боту /reload. В /list такие слова показываются отдельным блоком 💤.
 2. ТРЕВОГИ. Раз в 12 секунд спрашивает API воздушных тревог (alerts.in.ua)
    и присылает сообщения о тревогах и отбоях для Киева и Фастівського р-ну.
 3. ПУЛЬС. В общем чате висит закреплённое сообщение: два значка
@@ -143,7 +148,7 @@ def run_flask():
 # 3. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ
 # ============================================================
 # Версия бота (правила изменения номера: см. «ВЕРСИЯ» в начале файла).
-VERSION = "5.04 (20261103)"
+VERSION = "5.05 (20261104)"
 
 # Переменные окружения задаются на Render (Environment). В коде их менять
 # не нужно.
@@ -315,12 +320,13 @@ def db_get_settings():
 def db_get_keywords():
     """Читает таблицу keywords.
 
-    Возвращает кортеж (ключевые слова, множество «тихих» слов 🔕, исключения 🚫)
-    или None при ошибке БД. Если в таблице нет колонок quiet или stop, это тоже
+    Возвращает кортеж (ключевые слова, множество «тихих» слов 🔕, исключения 🚫,
+    отключённые слова) или None при ошибке БД. Слова, начинающиеся с «#»,
+    считаются отключёнными: в поиске они не участвуют. Если в таблице нет колонок quiet или stop, это тоже
     считается ошибкой (бот перейдёт на запасной список и в пульсе будет «БД»):
     так исключения не превратятся тихо в обычные ключевые слова."""
     if not supabase:
-        return [], set(), []
+        return [], set(), [], []
     try:
         res = supabase.table("keywords").select("word, quiet, stop").execute()
         _db_ok(True)
@@ -328,6 +334,7 @@ def db_get_keywords():
         words = []      # ключевые слова
         quiet = set()   # из них помеченные 🔕
         stops = []      # исключения
+        disabled = []   # отключённые (начинаются с «#»)
         for row in res.data:
             word = row.get("word") or ""
             # Пустые слова отбрасываем: "" содержится в любой строке,
@@ -335,13 +342,16 @@ def db_get_keywords():
             if not word.strip():
                 continue
             word = word.lower()     # текст постов тоже сравнивается в нижнем регистре
+            if word.startswith("#"):
+                disabled.append(word)   # как закомментированная строка: пропускаем
+                continue
             if row.get("stop"):
                 stops.append(word)
                 continue
             words.append(word)
             if row.get("quiet"):
                 quiet.add(word)
-        return words, quiet, stops
+        return words, quiet, stops, disabled
     except Exception as e:
         print(f"DB keywords err: {e}", flush=True)
         _db_ok(False)
@@ -435,10 +445,12 @@ USING_FALLBACK = (not supabase) or _initial_keywords is None or _initial_setting
 # QUIET_KEYWORDS  — те из них, что помечены 🔕 (без звука в тихом режиме)
 # STOP_WORDS      — исключения 🚫: вырезаются из текста поста перед поиском слов
 #                   (запасного списка исключений нет: при отказе БД их нет)
+# DISABLED_WORDS  — отключённые слова (в таблице начинаются с «#»): не участвуют
+#                   в поиске, только показываются в /list
 if (not supabase) or _initial_keywords is None:
-    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS = list(DEFAULT_KEYWORDS), set(), []
+    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS, DISABLED_WORDS = list(DEFAULT_KEYWORDS), set(), [], []
 else:
-    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS = _initial_keywords
+    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS, DISABLED_WORDS = _initial_keywords
 # BOT_SETTINGS — настройки: {"alerts": "on", "silent": "off", ...}
 BOT_SETTINGS = _initial_settings or dict(DEFAULT_SETTINGS)
 
@@ -916,6 +928,7 @@ async def try_recover_from_db():
     global KEYWORDS
     global QUIET_KEYWORDS
     global STOP_WORDS
+    global DISABLED_WORDS
     global BOT_SETTINGS
     global USING_FALLBACK
 
@@ -924,7 +937,7 @@ async def try_recover_from_db():
     if keywords is None or settings is None:
         return      # БД всё ещё недоступна, попробуем при следующей проверке
 
-    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS = keywords
+    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS, DISABLED_WORDS = keywords
     BOT_SETTINGS = settings
     USING_FALLBACK = False
     print(f"БД снова доступна: загружено слов {len(KEYWORDS)}", flush=True)
@@ -1021,10 +1034,11 @@ async def refresh_keywords():
     global KEYWORDS
     global QUIET_KEYWORDS
     global STOP_WORDS
+    global DISABLED_WORDS
     data = await asyncio.to_thread(db_get_keywords)
     if data is None:
         return False
-    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS = data
+    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS, DISABLED_WORDS = data
     return True
 
 
@@ -1037,7 +1051,8 @@ HELP_TEXT = (
     "/addstop слово — добавить исключение 🚫: оно вырезается из поста перед поиском "
     "слов (например, «київщин» против ложных срабатываний)\n"
     "(если слово уже есть, /add, /addsilent и /addstop меняют его тип)\n\n"
-    "/del слово — удалить слово или исключение\n\n"
+    "/del слово — удалить слово или исключение\n"
+    "(слово с # в начале отключено: правка в таблице + /reload)\n\n"
     "/list — настройки и список слов\n\n"
     "/alerts on | off — мониторинг воздушных тревог\n\n"
     "/silent on | off — тихий режим: отбои, жёлтые тревоги и слова с пометкой 🔕 приходят без звука\n"
@@ -1141,6 +1156,12 @@ async def cmd_list():
         lines.append(f"🚫 Исключения ({len(STOP_WORDS)}):")
         lines += [f'• "{w}"' for w in STOP_WORDS]
 
+    # Отключённые слова (начинаются с «#») тоже показываем, чтобы про них не забыть.
+    if DISABLED_WORDS:
+        lines.append("")
+        lines.append(f"💤 Отключённые ({len(DISABLED_WORDS)}):")
+        lines += [f'• "{w}"' for w in DISABLED_WORDS]
+
     # Лимит Telegram — 4096 символов на сообщение, поэтому режем на части.
     chunks = []
     current = header
@@ -1237,6 +1258,7 @@ async def cmd_reload():
     global KEYWORDS
     global QUIET_KEYWORDS
     global STOP_WORDS
+    global DISABLED_WORDS
     global BOT_SETTINGS
     global USING_FALLBACK
     new_keywords = await asyncio.to_thread(db_get_keywords)
@@ -1244,7 +1266,7 @@ async def cmd_reload():
     if new_keywords is None or new_settings is None:
         await reply("❌ Не удалось прочитать данные из БД")
         return
-    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS = new_keywords
+    KEYWORDS, QUIET_KEYWORDS, STOP_WORDS, DISABLED_WORDS = new_keywords
     BOT_SETTINGS = new_settings
     USING_FALLBACK = False      # данные теперь из БД, а не запасные
     # Настройка alerts могла измениться: обновляем пульс.
