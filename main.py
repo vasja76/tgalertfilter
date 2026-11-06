@@ -10,6 +10,10 @@
     * цифра до точки: только при существенных изменениях;
     * в скобках: дата правки в формате ГГГГММДД.
 История:
+    5.07 (20261106)  /2 weekend наоборот: на выходных (с пт 18:00 до пн 07:00)
+                     второй район НЕ отслеживается (это адрес работы)
+    5.06 (20261106)  команда /2 on|off|weekend: мониторинг второго района
+                     (Фастівський р-н); пока он выключен, в пульсе один значок
     5.05 (20261104)  слово с # в начале отключено (как закомментированное)
     5.04 (20261103)  слова-исключения (/addstop), любые типографские кавычки
                      в командах (iPhone ставит «ёлочки»)
@@ -68,6 +72,7 @@ SQL для создания таблиц (выполняется один раз
 Строки в bot_settings:
     alerts = on | off                    — мониторинг тревог
     silent = on | off | 23:00-06:00      — тихий режим (киевское время)
+    second = on | off | weekend          — мониторинг второго района (/2)
 
 ======================================================================
 КОМАНДЫ (пишутся в личном чате с ботом)
@@ -80,6 +85,8 @@ SQL для создания таблиц (выполняется один раз
     /alerts on|off      включить/выключить мониторинг тревог
     /silent on|off      тихий режим
     /silent 23-6        тихий режим только в эти часы
+    /2 on|off|weekend   второй район (из REGIONS): всегда / выключен / выключен
+                        на выходных (пт 18:00 - пн 07:00, киевское время)
     /now                статус тревог прямо сейчас (внеочередной запрос)
     /reload             перечитать данные из Supabase
     /help               справка
@@ -148,7 +155,7 @@ def run_flask():
 # 3. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ
 # ============================================================
 # Версия бота (правила изменения номера: см. «ВЕРСИЯ» в начале файла).
-VERSION = "5.05 (20261104)"
+VERSION = "5.07 (20261106)"
 
 # Переменные окружения задаются на Render (Environment). В коде их менять
 # не нужно.
@@ -257,7 +264,10 @@ WATCHED_DISTRICTS = _build_districts(REGIONS)
 #   silent: on | off | «23:00-06:00» — тихий режим. В нём без звука приходят
 #           «Відбій», жёлтые тревоги и слова с пометкой 🔕. Красные тревоги
 #           всегда со звуком.
-DEFAULT_SETTINGS = {"alerts": "on", "silent": "off"}
+#   second: on | off | weekend — мониторинг ВТОРОГО района из REGIONS
+#           (weekend = на выходных НЕ отслеживается, в остальное время
+#           отслеживается; границы выходных: WEEKEND_START и WEEKEND_END).
+DEFAULT_SETTINGS = {"alerts": "on", "silent": "off", "second": "on"}
 
 # Лимит запросов к API тревог в минуту (нужен только команде /now:
 # она не даст вместе с обычным опросом превысить этот лимит).
@@ -586,6 +596,73 @@ def silent_description():
     return f"{format_window(window)} (сейчас {state})"
 
 
+# ВЫХОДНЫЕ для режима /2 weekend: в это время второй район НЕ отслеживается
+# (на выходных вы не на работе). Время киевское. Формат: (день недели, час),
+# день недели как в weekday(): понедельник = 0, ... пятница = 4, воскресенье = 6.
+WEEKEND_START = (4, 18)     # начало: пятница 18:00
+WEEKEND_END = (0, 7)        # конец: понедельник 07:00
+
+DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def in_weekend(now=None):
+    """True, если сейчас выходные (от WEEKEND_START до WEEKEND_END по киевскому
+    времени). Окно переходит через конец недели (пт 18:00 -> пн 07:00), поэтому
+    время считается в минутах от понедельника 00:00."""
+    now = now or kyiv_now()
+    minute_of_week = now.weekday() * 1440 + now.hour * 60 + now.minute
+    start = WEEKEND_START[0] * 1440 + WEEKEND_START[1] * 60
+    end = WEEKEND_END[0] * 1440 + WEEKEND_END[1] * 60
+    if start < end:
+        return start <= minute_of_week < end
+    return minute_of_week >= start or minute_of_week < end
+
+
+def weekend_text():
+    """Границы выходных текстом, например 'пт 18:00 - пн 07:00'."""
+    return (f"{DAY_NAMES[WEEKEND_START[0]]} {WEEKEND_START[1]:02d}:00 - "
+            f"{DAY_NAMES[WEEKEND_END[0]]} {WEEKEND_END[1]:02d}:00")
+
+
+def second_name():
+    """Название второго района (для сообщений и справки)."""
+    return WATCHED_DISTRICTS[1]["name"] if len(WATCHED_DISTRICTS) > 1 else "второй район"
+
+
+def second_active(now=None):
+    """True, если второй район СЕЙЧАС отслеживается.
+
+    Учитывает настройку second: on — всегда, off — никогда, weekend — везде,
+    кроме выходных (см. in_weekend). Непонятное значение считается как on
+    (безопаснее не пропустить тревогу). Параметр now нужен только для тестов."""
+    if len(WATCHED_DISTRICTS) < 2:
+        return False
+    value = setting("second")
+    if value == "off":
+        return False
+    if value == "weekend":
+        return not in_weekend(now)
+    return True
+
+
+def active_districts():
+    """Районы, которые отслеживаются сейчас: первый всегда, второй — по
+    настройке second. Именно этот список используют опрос тревог, пульс и /now."""
+    return WATCHED_DISTRICTS[:1] + (WATCHED_DISTRICTS[1:2] if second_active() else [])
+
+
+def second_description():
+    """Текст о втором районе для /list и /2, например 'on' или
+    'weekend (сейчас не отслеживается)'."""
+    value = setting("second")
+    if value in ("on", "off"):
+        return value
+    if value == "weekend":
+        state = "отслеживается" if second_active() else "не отслеживается"
+        return f"weekend (сейчас {state})"
+    return f"{value} (непонятное значение, считается on)"
+
+
 # ============================================================
 # 7. КЛИЕНТ TELEGRAM И ОТПРАВКА СООБЩЕНИЙ
 # ============================================================
@@ -672,13 +749,15 @@ def register_api_request():
 def compute_current_status(active_alerts):
     """Определяет статус наших районов по списку тревог из API.
 
-    Возвращает словарь {ключ района: None | "yellow" | "red"}.
+    Возвращает словарь {ключ района: None | "yellow" | "red"} только для
+    районов, которые отслеживаются сейчас (active_districts).
     Если района в списке нет, значит у него отбой (None)."""
-    current = {d["key"]: None for d in WATCHED_DISTRICTS}
+    districts = active_districts()
+    current = {d["key"]: None for d in districts}
     for alert in active_alerts:
         uid = int(alert.location_uid) if alert.location_uid else 0
         title = (alert.location_title or "").lower()
-        for d in WATCHED_DISTRICTS:
+        for d in districts:
             # Район находим по коду, а если не совпал, то по названию
             # (если запасной поиск задан: пустая строка нашла бы любой район).
             if uid == d["uid"] or (d["title_part"] and d["title_part"] in title):
@@ -698,7 +777,7 @@ STATUS_TEXT = {
 def format_status(current):
     """Текст ответа на /now: статус каждого района по строке."""
     lines = ["📡 Статус тревог сейчас:"]
-    for d in WATCHED_DISTRICTS:
+    for d in active_districts():
         level = current[d["key"]]
         lines.append(f'{d["name"]}: {STATUS_TEXT.get(level, "❓ " + str(level))}')
     if setting("alerts") == "off":
@@ -784,6 +863,13 @@ async def alerts_monitoring_loop():
 
             last_status.update(current)
 
+            # Район, который сейчас не отслеживается (/2 off, выходные при /2 weekend),
+            # «забываем»: при включении он начнёт с чистого листа. Активная тревога
+            # тогда даст сообщение, а устаревшего «Відбій» не будет.
+            for key in last_status:
+                if key not in current:
+                    last_status[key] = None
+
             # Первый опрос выполнен: пульс при запуске может отправляться.
             if ALERTS_FIRST_POLL_DONE is not None:
                 ALERTS_FIRST_POLL_DONE.set()
@@ -828,12 +914,12 @@ def _update_heartbeat(problems=None):
     else:
         if not monitoring_enabled():
             # Мониторинг выключен или не настроен: серые кружки.
-            emojis = " ".join("⚪" for _ in WATCHED_DISTRICTS)
+            emojis = " ".join("⚪" for _ in active_districts())
         else:
-            # По одному значку на район, в порядке WATCHED_DISTRICTS.
+            # По одному значку на отслеживаемый район, в порядке REGIONS.
             emojis = " ".join(
                 PULSE_EMOJI.get(PULSE_LEVELS.get(d["key"]), "🟢")
-                for d in WATCHED_DISTRICTS
+                for d in active_districts()
             )
         text = f"{emojis} {kyiv_now().strftime('%H:%M')}"
 
@@ -1057,6 +1143,7 @@ HELP_TEXT = (
     "/alerts on | off — мониторинг воздушных тревог\n\n"
     "/silent on | off — тихий режим: отбои, жёлтые тревоги и слова с пометкой 🔕 приходят без звука\n"
     "/silent 23-6 — тихий режим только в эти часы (киевское время)\n\n"
+    f"/2 on | off | weekend — второй район ({second_name()}): всегда / выключен / выключен на выходных ({weekend_text()})\n\n"
     "/now — статус тревог прямо сейчас (внеочередной запрос)\n\n"
     "/reload — перечитать данные из Supabase (после ручной правки таблиц)\n\n"
     "/help — эта справка"
@@ -1141,7 +1228,8 @@ async def cmd_list():
     """/list — настройки и список слов (длинный список режется на части)."""
     header = (
         f"⚙️ Настройки:\nalerts = {setting('alerts')}\n"
-        f"silent = {silent_description()}\n\n"
+        f"silent = {silent_description()}\n"
+        f"2 ({second_name()}) = {second_description()}\n\n"
         f"🔑 Ключевые слова ({len(KEYWORDS)}):\n"
     )
     if QUIET_KEYWORDS:
@@ -1228,6 +1316,40 @@ async def cmd_silent(text):
         )
 
 
+async def cmd_second(text):
+    """/2 on | off | weekend — мониторинг второго района (второй в REGIONS).
+
+    on — тревоги и отбои приходят всегда; off — не приходят вообще;
+    weekend — не приходят на выходных (WEEKEND_START - WEEKEND_END, киевское
+    время), в остальное время приходят.
+    Пока второй район не отслеживается, в пульсе один значок."""
+    global BOT_SETTINGS
+    val = text[2:].strip().lower()
+    if val not in ("on", "off", "weekend"):
+        await reply(
+            f"Второй район ({second_name()}): {second_description()}\n"
+            "Используйте /2 on, /2 off или /2 weekend"
+        )
+        return
+    if not await asyncio.to_thread(db_set_setting, "second", val):
+        await reply("❌ Ошибка записи в БД")
+        return
+
+    BOT_SETTINGS = {**BOT_SETTINGS, "second": val}
+    # Пульс меняется сразу: один или два значка.
+    await asyncio.to_thread(update_heartbeat, LAST_HEALTH_PROBLEMS)
+    if val == "on":
+        await reply(f"✅ {second_name()}: отслеживается всегда.")
+    elif val == "off":
+        await reply(f"⛔ {second_name()}: не отслеживается (тревоги и отбои не приходят).")
+    else:
+        state = "Сейчас отслеживается." if second_active() else "Сейчас не отслеживается."
+        await reply(
+            f"📅 {second_name()}: не отслеживается на выходных "
+            f"({weekend_text()}, киевское время).\n{state}"
+        )
+
+
 async def cmd_now():
     """/now — внеочередной запрос статуса тревог.
 
@@ -1303,6 +1425,8 @@ async def handle_my_commands(event):
         await cmd_alerts(text)
     elif text == "/silent" or text.startswith("/silent "):
         await cmd_silent(text)
+    elif text == "/2" or text.startswith("/2 "):
+        await cmd_second(text)
     elif text == "/now":
         await cmd_now()
     elif text == "/help":
