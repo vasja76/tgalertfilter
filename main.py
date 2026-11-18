@@ -9,9 +9,12 @@
     * цифры после точки: +1 при каждой правке кода;
     * цифра до точки: только при существенных изменениях;
     * в скобках: дата правки в формате ГГГГММДД.
-В этой версии (5.08): когда режим, зависящий от времени, включается или
-выключается сам (тихий режим по расписанию и второй район по выходным), в
-общий чат приходит короткое сообщение без звука: «Режим silent включен.»,
+В этой версии (5.09): /silent. Расписание не сбрасывается от /silent on|off.
+При заданном расписании on/off действует до ближайшей границы расписания,
+потом снова управляет расписание. Расписание отключается командой /silent 0.
+В версии 5.08: когда режим, зависящий от времени, включается или выключается
+сам (тихий режим по расписанию и второй район по выходным), в общий чат
+приходит короткое сообщение без звука: «Режим silent включен.»,
 «Район 2 выключен.» и т.п.
 
 ======================================================================
@@ -67,7 +70,11 @@ SQL для создания таблиц (выполняется один раз
 
 Строки в bot_settings:
     alerts = on | off                    — мониторинг тревог
-    silent = on | off | 23:00-06:00      — тихий режим (киевское время)
+    silent = on | off                    — ручной тихий режим (когда нет расписания)
+    silent_window = off | 23:00-06:00    — расписание тихого режима (киевское время)
+    silent_override = none | on|2026-11-18T06:00
+                                         — ручное on/off при расписании, действует
+                                           до указанного времени (служебная строка)
     second = on | off | weekend          — мониторинг второго района (/2)
 
 ======================================================================
@@ -79,8 +86,9 @@ SQL для создания таблиц (выполняется один раз
     /del слово          удалить слово или исключение
     /list               настройки и список слов
     /alerts on|off      включить/выключить мониторинг тревог
-    /silent on|off      тихий режим
-    /silent 23-6        тихий режим только в эти часы
+    /silent on|off      тихий режим (при расписании: до ближайшей границы расписания)
+    /silent 23-6        тихий режим только в эти часы (расписание)
+    /silent 0           отключить расписание тихого режима
     /2 on|off|weekend   второй район (из REGIONS): всегда / выключен / выключен
                         на выходных (пт 18:00 - пн 07:00, киевское время)
     /now                статус тревог прямо сейчас (внеочередной запрос)
@@ -151,7 +159,7 @@ def run_flask():
 # 3. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ
 # ============================================================
 # Версия бота (правила изменения номера: см. «ВЕРСИЯ» в начале файла).
-VERSION = "5.08 (20261109)"
+VERSION = "5.09 (20261118)"
 
 # Переменные окружения задаются на Render (Environment). В коде их менять
 # не нужно.
@@ -257,13 +265,25 @@ WATCHED_DISTRICTS = _build_districts(REGIONS)
 
 # Настройки по умолчанию (используются, пока в таблице нет своей строки).
 #   alerts: on | off — мониторинг тревог
-#   silent: on | off | «23:00-06:00» — тихий режим. В нём без звука приходят
-#           «Відбій», жёлтые тревоги и слова с пометкой 🔕. Красные тревоги
-#           всегда со звуком.
+#   silent: on | off — ручной тихий режим (действует, когда расписания нет).
+#           В тихом режиме без звука приходят «Відбій», жёлтые тревоги и слова
+#           с пометкой 🔕. Красные тревоги всегда со звуком.
+#   silent_window: off | «23:00-06:00» — расписание тихого режима
+#           (/silent 23-6; /silent 0 отключает расписание).
+#   silent_override: none | «on|2026-11-18T06:00» — ручное включение или
+#           выключение (/silent on|off) при заданном расписании: действует
+#           до ближайшей границы расписания (указана киевским временем),
+#           потом снова управляет расписание.
 #   second: on | off | weekend — мониторинг ВТОРОГО района из REGIONS
 #           (weekend = на выходных НЕ отслеживается, в остальное время
 #           отслеживается; границы выходных: WEEKEND_START и WEEKEND_END).
-DEFAULT_SETTINGS = {"alerts": "on", "silent": "off", "second": "on"}
+DEFAULT_SETTINGS = {
+    "alerts": "on",
+    "silent": "off",
+    "silent_window": "off",
+    "silent_override": "none",
+    "second": "on",
+}
 
 # Лимит запросов к API тревог в минуту (нужен только команде /now:
 # она не даст вместе с обычным опросом превысить этот лимит).
@@ -554,25 +574,70 @@ def format_window(window):
     return "-".join(f"{m // 60:02d}:{m % 60:02d}" for m in window)
 
 
+def silent_window_value():
+    """Расписание тихого режима: строка окна ('23:00-06:00') или 'off'.
+
+    Совместимость со старым форматом: раньше окно хранилось прямо в настройке
+    silent. Если расписание не задано, а в silent лежит не on/off, берём его оттуда."""
+    window = setting("silent_window")
+    if window == "off":
+        old = setting("silent")
+        if old not in ("on", "off"):
+            return old
+    return window
+
+
+def parse_silent_override(value):
+    """Разбирает ручное переключение при заданном расписании ('on|2026-11-18T06:00').
+
+    Возвращает (режим 'on'|'off', до какого времени: datetime без часового
+    пояса, киевское время) или None, если переключения нет или значение непонятно."""
+    try:
+        mode, until = value.split("|", 1)
+        if mode not in ("on", "off"):
+            return None
+        return mode, datetime.strptime(until, "%Y-%m-%dT%H:%M")
+    except Exception:
+        return None
+
+
+def active_silent_override(now=None):
+    """Ручное переключение (режим, до_времени), если оно ещё действует, иначе None."""
+    override = parse_silent_override(setting("silent_override"))
+    now = now or kyiv_now()
+    if override and now.replace(tzinfo=None) < override[1]:
+        return override
+    return None
+
+
+def next_silent_boundary(window, now=None):
+    """Ближайшая граница окна (его начало или конец) строго после now.
+    Возвращает datetime без часового пояса (киевское время)."""
+    now = (now or kyiv_now()).replace(tzinfo=None)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    candidates = [midnight + timedelta(days=d, minutes=m) for d in (0, 1) for m in window]
+    return min(c for c in candidates if c > now)
+
+
 def silent_mode(now=None):
     """True, если СЕЙЧАС сообщения должны приходить без звука.
 
-    Учитывает настройку silent: on / off / окно времени.
+    Порядок: 1) расписания нет: ручная настройка silent (on / off);
+    2) расписание есть и действует ручное переключение (/silent on|off):
+    оно, до ближайшей границы расписания; 3) иначе: по расписанию.
     Параметр now нужен только для тестов (по умолчанию берётся текущее время)."""
-    value = setting("silent")
-    if value == "on":
-        return True
-    if value == "off":
-        return False
-
-    window = parse_silent_window(value)
+    window = parse_silent_window(silent_window_value())
     if window is None:
-        # Непонятное значение (например, поправили в таблице вручную):
-        # безопаснее, чтобы сообщения шли со звуком.
-        return False
+        # Расписания нет (или оно непонятно: например, поправили в таблице
+        # вручную). Безопаснее, чтобы всё, кроме явного on, шло со звуком.
+        return setting("silent") == "on"
+
+    now = now or kyiv_now()
+    override = active_silent_override(now)
+    if override:
+        return override[0] == "on"
 
     start, end = window
-    now = now or kyiv_now()
     minutes = now.hour * 60 + now.minute
     if start < end:
         return start <= minutes < end       # обычное окно, например 6-23
@@ -581,15 +646,25 @@ def silent_mode(now=None):
 
 def silent_description():
     """Текст о тихом режиме для /list и /silent, например:
-    'off' или '23:00-06:00 (сейчас тихо)'."""
-    value = setting("silent")
-    if value in ("on", "off"):
-        return value
-    window = parse_silent_window(value)
+    'off', 'on' или '23:00-06:00 (сейчас тихо, вручную до 06:00)'."""
+    raw_window = silent_window_value()
+    window = parse_silent_window(raw_window)
     if window is None:
-        return f"{value} (непонятное значение, считается off)"
-    state = "тихо" if silent_mode() else "со звуком"
-    return f"{format_window(window)} (сейчас {state})"
+        manual = setting("silent")
+        text = manual if manual in ("on", "off") else f"{manual} (непонятное значение, считается off)"
+        if raw_window not in ("off", manual):
+            text += f"; расписание непонятно: {raw_window}"
+        return text
+
+    now = kyiv_now()
+    state = "тихо" if silent_mode(now) else "со звуком"
+    text = f"{format_window(window)} (сейчас {state}"
+    override = active_silent_override(now)
+    if override:
+        until = override[1]
+        until_text = until.strftime("%H:%M") if until.date() == now.date() else until.strftime("%d.%m %H:%M")
+        text += f", вручную до {until_text}"
+    return text + ")"
 
 
 # ВЫХОДНЫЕ для режима /2 weekend: в это время второй район НЕ отслеживается
@@ -1071,23 +1146,27 @@ async def schedule_notice_loop():
     изменилось: значит, сработало время. Если режим поменяла команда
     (/silent, /2, /reload), сообщения в чат нет: ответ приходит в личный чат.
     Сообщения идут без звука. Расчёт локальный, запросов в сеть нет."""
-    # (имя настройки, функция «режим сейчас включён?», текст при включении,
+    # (имя режима, функция «настройки режима» — если они поменялись, значит
+    #  поменяла команда, функция «режим сейчас включён?», текст при включении,
     #  текст при выключении, нужно ли сейчас вообще сообщать)
     modes = [
-        ("silent", silent_mode, "Режим silent включен.", "Режим silent выключен.",
+        ("silent",
+         lambda: (setting("silent"), setting("silent_window"), setting("silent_override")),
+         silent_mode, "Режим silent включен.", "Режим silent выключен.",
          lambda: True),
         # Если мониторинг тревог выключен (/alerts off), про район не сообщаем.
-        ("second", second_active, "Район 2 включен.", "Район 2 выключен.",
+        ("second", lambda: setting("second"),
+         second_active, "Район 2 включен.", "Район 2 выключен.",
          monitoring_enabled),
     ]
 
     # Запоминаем стартовое состояние: при запуске бота сообщений не будет.
-    last = {name: (setting(name), state()) for name, state, _, _, _ in modes}
+    last = {name: (values(), state()) for name, values, state, _, _, _ in modes}
 
     while True:
         await asyncio.sleep(30)
-        for name, state, text_on, text_off, notice_ok in modes:
-            value, active = setting(name), state()
+        for name, values, state, text_on, text_off, notice_ok in modes:
+            value, active = values(), state()
             old_value, old_active = last[name]
             last[name] = (value, active)
             if value == old_value and active != old_active and notice_ok():
@@ -1170,7 +1249,9 @@ HELP_TEXT = (
     "/list — настройки и список слов\n\n"
     "/alerts on | off — мониторинг воздушных тревог\n\n"
     "/silent on | off — тихий режим: отбои, жёлтые тревоги и слова с пометкой 🔕 приходят без звука\n"
-    "/silent 23-6 — тихий режим только в эти часы (киевское время)\n\n"
+    "(при заданном расписании действует до ближайшей границы расписания)\n"
+    "/silent 23-6 — тихий режим только в эти часы (киевское время)\n"
+    "/silent 0 — отключить расписание\n\n"
     f"/2 on | off | weekend — второй район ({second_name()}): всегда / выключен / выключен на выходных ({weekend_text()})\n\n"
     "/now — статус тревог прямо сейчас (внеочередной запрос)\n\n"
     "/reload — перечитать данные из Supabase (после ручной правки таблиц)\n\n"
@@ -1309,37 +1390,76 @@ async def cmd_alerts(text):
 
 
 async def cmd_silent(text):
-    """/silent on | off | 23-6 — тихий режим (постоянный или по расписанию)."""
+    """/silent on | off | 23-6 | 0 — тихий режим.
+
+    on / off без расписания: постоянно.
+    on / off при заданном расписании: до ближайшей границы расписания, потом
+    снова расписание.
+    23-6: задать расписание.   0: отключить расписание (режим остаётся как сейчас)."""
     global BOT_SETTINGS
     val = text[7:].strip().lower()
-    window = None if val in ("on", "off", "") else parse_silent_window(val)
+    window = None if val in ("on", "off", "0", "") else parse_silent_window(val)
 
     # Непонятный ввод (или команда без аргумента): показываем состояние и подсказку.
-    if val not in ("on", "off") and window is None:
+    if val not in ("on", "off", "0") and window is None:
         await reply(
             f"Тихий режим: {silent_description()}\n"
-            "Используйте /silent on, /silent off или, например, /silent 23-6"
+            "Используйте /silent on, /silent off, /silent 23-6 (по расписанию) "
+            "или /silent 0 (отключить расписание)"
         )
         return
 
-    # В базе хранится "on", "off" или окно в виде "23:00-06:00".
-    stored = val if val in ("on", "off") else format_window(window)
-    if not await asyncio.to_thread(db_set_setting, "silent", stored):
-        await reply("❌ Ошибка записи в БД")
-        return
+    current_window = parse_silent_window(silent_window_value())
 
-    BOT_SETTINGS = {**BOT_SETTINGS, "silent": stored}
-    if stored == "on":
+    # Что записать в БД (порядок важен: пишется сверху вниз).
+    if val == "0":
+        if current_window is None:
+            await reply(f"Расписание тихого режима не задано.\nТихий режим: {silent_description()}")
+            return
+        # Расписание снимаем, текущий режим остаётся постоянным.
+        updates = {"silent": "on" if silent_mode() else "off", "silent_window": "off"}
+    elif val in ("on", "off"):
+        if current_window is None:
+            updates = {"silent": val}
+        else:
+            until = next_silent_boundary(current_window)
+            updates = {"silent_override": f"{val}|{until.strftime('%Y-%m-%dT%H:%M')}"}
+    else:
+        # Новое расписание сбрасывает ручное переключение.
+        updates = {"silent_override": "none", "silent_window": format_window(window)}
+
+    for key, value in updates.items():
+        if not await asyncio.to_thread(db_set_setting, key, value):
+            await reply("❌ Ошибка записи в БД")
+            return
+        BOT_SETTINGS = {**BOT_SETTINGS, key: value}
+
+    if val == "0":
+        state = "включён" if setting("silent") == "on" else "выключен"
         await reply(
-            "🔕 Тихий режим включён.\n"
-            "Без звука: отбои, жёлтые тревоги и слова с пометкой 🔕."
+            "⏹ Расписание тихого режима отключено.\n"
+            f"Тихий режим сейчас {state} и остаётся так до /silent on|off."
         )
-    elif stored == "off":
-        await reply("🔔 Тихий режим выключен. Всё приходит со звуком.")
+    elif val in ("on", "off"):
+        if current_window is None:
+            if val == "on":
+                await reply(
+                    "🔕 Тихий режим включён.\n"
+                    "Без звука: отбои, жёлтые тревоги и слова с пометкой 🔕."
+                )
+            else:
+                await reply("🔔 Тихий режим выключен. Всё приходит со звуком.")
+        else:
+            what = "включён" if val == "on" else "выключен"
+            await reply(
+                f"{'🔕' if val == 'on' else '🔔'} Тихий режим {what} вручную "
+                f"до {until.strftime('%H:%M')}, дальше снова по расписанию "
+                f"{format_window(current_window)}."
+            )
     else:
         state = "без звука" if silent_mode() else "со звуком"
         await reply(
-            f"🕐 Тихий режим по расписанию: {stored} (киевское время).\n"
+            f"🕐 Тихий режим по расписанию: {format_window(window)} (киевское время).\n"
             f"Сейчас приходит {state}."
         )
 
