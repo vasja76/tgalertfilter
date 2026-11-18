@@ -9,7 +9,12 @@
     * цифры после точки: +1 при каждой правке кода;
     * цифра до точки: только при существенных изменениях;
     * в скобках: дата правки в формате ГГГГММДД.
-В этой версии (5.09): /silent. Расписание не сбрасывается от /silent on|off.
+В этой версии (6.00): источник тревог заменён: вместо alerts.in.ua используется
+API ukrainealarm.com (ключ в переменной окружения ALARM_API_TOKEN). Опрос
+по-прежнему раз в 12 секунд, но теперь по запросу на каждый район (до 10
+запросов в минуту). Новый статус «Невизначений рівень»: тревога есть, а цвет
+(красный или жёлтый) не указан. Остальная логика не изменена.
+В версии 5.09: /silent. Расписание не сбрасывается от /silent on|off.
 При заданном расписании on/off действует до ближайшей границы расписания,
 потом снова управляет расписание. Расписание отключается командой /silent 0.
 В версии 5.08: когда режим, зависящий от времени, включается или выключается
@@ -31,7 +36,7 @@
    как закомментированное. Оно остаётся в таблице, пометки сохраняются.
    Отключить/включить: дописать/убрать «#» в панели Supabase и отправить
    боту /reload. В /list такие слова показываются отдельным блоком 💤.
-2. ТРЕВОГИ. Раз в 12 секунд спрашивает API воздушных тревог (alerts.in.ua)
+2. ТРЕВОГИ. Раз в 12 секунд спрашивает API воздушных тревог (ukrainealarm.com)
    и присылает сообщения о тревогах и отбоях для Киева и Фастівського р-ну.
 3. ПУЛЬС. В общем чате висит закреплённое сообщение: два значка
    (Київ, Фастівський р-н) и время. Если что-то сломалось, вместо него
@@ -129,7 +134,6 @@ from flask import Flask                     # веб-сервер для Render
 from telethon import TelegramClient, events # клиент Telegram (ваш аккаунт)
 from telethon.sessions import StringSession # сохранённый вход без телефона
 import requests                             # запросы к Bot API Telegram
-from alerts_in_ua import AsyncClient as AlertsClient   # API воздушных тревог
 from supabase import create_client, Client  # база данных Supabase
 
 
@@ -159,7 +163,7 @@ def run_flask():
 # 3. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ
 # ============================================================
 # Версия бота (правила изменения номера: см. «ВЕРСИЯ» в начале файла).
-VERSION = "5.09 (20261118)"
+VERSION = "6.00 (20261118)"
 
 # Переменные окружения задаются на Render (Environment). В коде их менять
 # не нужно.
@@ -169,7 +173,10 @@ API_HASH = os.environ.get("API_HASH")               # Telegram API: api_hash
 BOT_TOKEN = os.environ.get("BOT_TOKEN")             # токен бота от @BotFather
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID"))  # ID общего чата/канала
 SESSION_STRING = os.environ.get("SESSION_STRING")   # вход вашего аккаунта
-ALERTS_API_TOKEN = os.environ.get("ALERTS_API_TOKEN")   # токен alerts.in.ua
+ALARM_API_TOKEN = os.environ.get("ALARM_API_TOKEN")     # ключ API ukrainealarm.com
+
+# Адрес API воздушных тревог (ukrainealarm.com, версия 3).
+ALARM_API_URL = "https://api.ukrainealarm.com/api/v3"
 
 # SUPABASE_KEY — секретный ключ (service_role / secret). Он обходит RLS и
 # должен храниться только на сервере.
@@ -229,33 +236,31 @@ DEFAULT_KEYWORDS = [
 
 # РАЙОНЫ, за которыми следит бот (обычно два). Чтобы сменить район,
 # поправьте эту таблицу и задеплойте код.
-# Формат строки:  (номер региона, "название", "запасной поиск")
-#   номер региона  — location_uid из API alerts.in.ua (Київ = 31)
+# Формат строки:  (номер региона, "название")
+#   номер региона  — regionId из API ukrainealarm.com (Київ = 31,
+#                    Фастівський район = 77; весь список: GET /api/v3/regions)
 #   название       — как район назван в сообщениях о тревогах
-#   запасной поиск — НЕобязательно: часть названия из API строчными буквами;
-#                    срабатывает, если номер вдруг не совпал.
-#                    Можно не указывать, например: (31, "Київ")
+# Тревоги в API выдаются по районам (не по громадам), поэтому для Боярки
+# отслеживается Фастівський район.
 # Порядок важен: первый район — первый значок в пульсе.
 REGIONS = [
-    (31, "Київ", "м. київ"),
-    (77, "Фастівський р-н", "фастів"),
+    (31, "Київ"),
+    (77, "Фастівський р-н"),
 ]
 
 
 def _build_districts(regions):
     """Превращает таблицу REGIONS в список словарей, с которыми работает код.
 
-    key        — внутреннее имя района ("r31"), по нему хранится статус
-    name       — название для сообщений
-    uid        — номер региона в API
-    title_part — запасной поиск по названию ("" — не используется)"""
+    key  — внутреннее имя района ("r31"), по нему хранится статус
+    name — название для сообщений
+    uid  — номер региона в API (regionId)"""
     districts = []
-    for uid, name, *rest in regions:
+    for uid, name, *_ in regions:
         districts.append({
             "key": f"r{uid}",
             "name": name,
             "uid": int(uid),
-            "title_part": rest[0].lower() if rest else "",
         })
     return districts
 
@@ -285,9 +290,11 @@ DEFAULT_SETTINGS = {
     "second": "on",
 }
 
-# Лимит запросов к API тревог в минуту (нужен только команде /now:
-# она не даст вместе с обычным опросом превысить этот лимит).
-API_LIMIT_PER_MIN = 10
+# Свой ограничитель запросов к API тревог в минуту (официальный лимит
+# ukrainealarm.com неизвестен). Нужен только команде /now: она не даст вместе
+# с обычным опросом (по запросу на район раз в 12 секунд, то есть до 10 в
+# минуту) превысить это число.
+API_LIMIT_PER_MIN = 15
 
 # Максимальная длина сообщения, которую бот отправляет. У Telegram предел
 # 4096 символов; берём с запасом, чтобы длинный пост не пропал из-за префикса.
@@ -481,7 +488,6 @@ else:
 BOT_SETTINGS = _initial_settings or dict(DEFAULT_SETTINGS)
 
 # --- Тревоги ---
-ALERTS_CLIENT = None            # клиент API тревог (создаётся в цикле тревог, им же пользуется /now)
 ALERTS_LAST_OK = time.time()    # когда API тревог отвечал в последний раз (для пульса)
 API_REQUEST_TIMES = deque()     # времена запросов к API за последнюю минуту (для лимита)
 ALERTS_FIRST_POLL_DONE = None   # событие «первый опрос выполнен» (создаётся при запуске)
@@ -490,7 +496,7 @@ ALERTS_FIRST_POLL_DONE = None   # событие «первый опрос вы�
 HEARTBEAT_MESSAGE_ID = None     # ID закреплённого сообщения (None — ещё не создано)
 LAST_PULSE_TEXT = None          # текст, который сейчас показан в пульсе
 HEARTBEAT_LOCK = threading.Lock()   # пульс обновляют два цикла: блокировка исключает дубли
-PULSE_LEVELS = {}               # статус районов в пульсе: {"r31": None|"yellow"|"red", ...}
+PULSE_LEVELS = {}               # статус районов в пульсе: {"r31": None|"yellow"|"red"|"unknown", ...}
 LAST_HEALTH_PROBLEMS = []       # список проблем из последней проверки здоровья
 
 # --- Команды ---
@@ -507,7 +513,7 @@ def setting(key):
 def monitoring_enabled():
     """True, если мониторинг тревог должен работать: задан токен
     и не выключен командой /alerts off."""
-    return bool(ALERTS_API_TOKEN) and setting("alerts") != "off"
+    return bool(ALARM_API_TOKEN) and setting("alerts") != "off"
 
 
 # ============================================================
@@ -795,13 +801,18 @@ async def notify(text, silent=False, chat_id=None):
 # 8. МОНИТОРИНГ ВОЗДУШНЫХ ТРЕВОГ
 # ============================================================
 # Как это работает:
-#   1. Раз в 12 секунд ОДИН запрос к API: он возвращает все активные
-#      тревоги по стране.
-#   2. Из них выбираем наши районы (WATCHED_DISTRICTS) и получаем статус
-#      каждого: None (отбой), "yellow" или "red".
+#   1. Раз в 12 секунд по запросу на каждый отслеживаемый район, один за
+#      другим (GET /api/v3/alerts/{regionId}): Київ = 31, Фастівський р-н = 77.
+#      Если второй район сейчас не отслеживается (/2 off, выходные при
+#      /2 weekend), запрос только один.
+#   2. По цвету тревоги получаем статус района: None (отбой), "yellow",
+#      "red" или "unknown" (тревога есть, а цвет не указан). Тип тревоги
+#      не важен, учитывается только цвет.
 #   3. Сравниваем с прошлым статусом. Сообщение отправляется только если
 #      статус изменился.
 #   4. Районы с одинаковым новым статусом объединяются в одно сообщение.
+# Если не удался хотя бы один запрос (сеть, ключ, лимит) или ответ непонятный,
+# цикл пропускается: статусы не меняются, «отбой» не выдумывается.
 
 def api_requests_last_minute():
     """Сколько запросов к API тревог сделано за последние 60 секунд
@@ -817,23 +828,57 @@ def register_api_request():
     API_REQUEST_TIMES.append(time.time())
 
 
-def compute_current_status(active_alerts):
-    """Определяет статус наших районов по списку тревог из API.
+def fetch_region_alerts(region_id):
+    """Один запрос к API: статус региона. Синхронная функция (вызывается через
+    asyncio.to_thread). Возвращает разобранный JSON; при ошибке (сеть, ключ,
+    лимит) выбрасывает исключение."""
+    resp = requests.get(
+        f"{ALARM_API_URL}/alerts/{region_id}",
+        headers={"Authorization": ALARM_API_TOKEN.strip()},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
-    Возвращает словарь {ключ района: None | "yellow" | "red"} только для
-    районов, которые отслеживаются сейчас (active_districts).
-    Если района в списке нет, значит у него отбой (None)."""
-    districts = active_districts()
-    current = {d["key"]: None for d in districts}
-    for alert in active_alerts:
-        uid = int(alert.location_uid) if alert.location_uid else 0
-        title = (alert.location_title or "").lower()
-        for d in districts:
-            # Район находим по коду, а если не совпал, то по названию
-            # (если запасной поиск задан: пустая строка нашла бы любой район).
-            if uid == d["uid"] or (d["title_part"] and d["title_part"] in title):
-                current[d["key"]] = alert.alert_level
-                break
+
+def level_from_region_data(data, uid):
+    """Статус района по ответу API: None | "yellow" | "red" | "unknown".
+
+    data — ответ /alerts/{uid}: список из одной записи региона; пустой
+    activeAlerts означает, что тревоги нет. Тип тревоги не важен, учитывается
+    только цвет. Красный главнее жёлтого. "unknown": тревога есть, а цвет не
+    указан. Если ответ непонятный или в нём нет нужного региона, выбрасывает
+    исключение: статус при этом не меняется."""
+    if not isinstance(data, list):
+        raise ValueError(f"неожиданный ответ API: {type(data).__name__}")
+    records = [r for r in data if isinstance(r, dict) and str(r.get("regionId")) == str(uid)]
+    if not records:
+        raise ValueError(f"в ответе API нет региона {uid}")
+
+    alerts = records[0].get("activeAlerts") or []
+    if not alerts:
+        return None
+    levels = []
+    for alert in alerts:
+        for lv in alert.get("activeAlertLevels") or []:
+            levels.append(str(lv.get("alertLevel", "")).lower())
+    if "red" in levels:
+        return "red"
+    if "yellow" in levels:
+        return "yellow"
+    return "unknown"
+
+
+async def fetch_current_status():
+    """Статус наших районов: {ключ района: None | "yellow" | "red" | "unknown"}
+    только для районов, которые отслеживаются сейчас (active_districts).
+    Запросы идут один за другим. Если не удался хотя бы один, выбрасывает
+    исключение (статусы не меняем)."""
+    current = {}
+    for d in active_districts():
+        register_api_request()
+        data = await asyncio.to_thread(fetch_region_alerts, d["uid"])
+        current[d["key"]] = level_from_region_data(data, d["uid"])
     return current
 
 
@@ -841,6 +886,7 @@ def compute_current_status(active_alerts):
 STATUS_TEXT = {
     "red": "🔴 красная тревога",
     "yellow": "🟡 жёлтая тревога",
+    "unknown": "❓ тревога, уровень не определён",
     None: "🟢 тревоги нет",
 }
 
@@ -878,6 +924,9 @@ def build_alert_messages(changes):
         elif level == "yellow":
             # Жёлтая: без звука в тихом режиме.
             messages.append((f"🟡 Тривога {joined} / Жовтий рівень", silent_mode()))
+        elif level == "unknown":
+            # Цвет не указан: без звука в тихом режиме (как жёлтая).
+            messages.append((f"❓ Тривога {joined} / Невизначений рівень", silent_mode()))
         elif level is None:
             # Відбій: без звука в тихом режиме.
             messages.append((f"🟢 Відбій {joined}", silent_mode()))
@@ -887,15 +936,11 @@ def build_alert_messages(changes):
 async def alerts_monitoring_loop():
     """Бесконечный цикл опроса API тревог (запускается при старте бота)."""
     global ALERTS_LAST_OK
-    global ALERTS_CLIENT
     global PULSE_LEVELS
 
-    if not ALERTS_API_TOKEN:
-        print("ALERTS_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
+    if not ALARM_API_TOKEN:
+        print("ALARM_API_TOKEN не задан, мониторинг тревог отключен.", flush=True)
         return
-
-    alerts_client = AlertsClient(token=ALERTS_API_TOKEN)
-    ALERTS_CLIENT = alerts_client           # его же использует команда /now
 
     # Статусы, о которых мы уже сообщили. С ними сравниваем каждый опрос.
     last_status = {d["key"]: None for d in WATCHED_DISTRICTS}
@@ -911,15 +956,11 @@ async def alerts_monitoring_loop():
             continue
 
         try:
-            # Один запрос возвращает все активные тревоги по стране.
-            register_api_request()
-            active_alerts = list(await alerts_client.get_active_alerts())
-            ALERTS_LAST_OK = time.time()
-
-            # Пустой список — нормальный ответ: тревог по стране нет, значит
-            # в наших районах отбой. Ошибки запроса (сеть, токен) выбрасывают
+            # Статус каждого отслеживаемого района (по запросу на район).
+            # Ошибки запроса (сеть, ключ, лимит) и непонятный ответ выбрасывают
             # исключение (см. except ниже) и статусы не меняют.
-            current = compute_current_status(active_alerts)
+            current = await fetch_current_status()
+            ALERTS_LAST_OK = time.time()
 
             # 1. Сообщения только по тем районам, где статус изменился.
             changes = {k: v for k, v in current.items() if v != last_status[k]}
@@ -947,7 +988,7 @@ async def alerts_monitoring_loop():
         except Exception as e:
             print(f"Alerts API err: {e}", flush=True)
 
-        await asyncio.sleep(12)     # пауза между опросами (не более 5 запросов в минуту)
+        await asyncio.sleep(12)     # пауза между опросами (по запросу на район: до 10 в минуту)
 
 
 # ============================================================
@@ -959,7 +1000,7 @@ async def alerts_monitoring_loop():
 #   есть проблемы:   «БД, Telegram»  (только список, без значков и времени)
 # Сообщение создаётся один раз, закрепляется и дальше только редактируется.
 
-PULSE_EMOJI = {None: "🟢", "yellow": "🟡", "red": "🔴"}
+PULSE_EMOJI = {None: "🟢", "yellow": "🟡", "red": "🔴", "unknown": "❓"}
 
 
 def update_heartbeat(problems=None):
@@ -1505,18 +1546,17 @@ async def cmd_now():
     показывает статус: цикл опроса продолжает работать по обычным правилам
     и сам отправит сообщение в группу, если статус изменился."""
     global ALERTS_LAST_OK
-    if ALERTS_CLIENT is None:
-        await reply("❌ ALERTS_API_TOKEN не задан, запрос невозможен")
+    if not ALARM_API_TOKEN:
+        await reply("❌ ALARM_API_TOKEN не задан, запрос невозможен")
         return
-    # Запас в 1 запрос до лимита API (обычный опрос тоже считается).
-    if api_requests_last_minute() >= API_LIMIT_PER_MIN - 1:
+    # Запас в 2 запроса до лимита (обычный опрос тоже считается).
+    if api_requests_last_minute() >= API_LIMIT_PER_MIN - 2:
         await reply("⏳ Лимит запросов к API исчерпан, повторите через 10–15 секунд")
         return
     try:
-        register_api_request()
-        active = list(await ALERTS_CLIENT.get_active_alerts())
+        current = await fetch_current_status()
         ALERTS_LAST_OK = time.time()
-        await reply(format_status(compute_current_status(active)))
+        await reply(format_status(current))
     except Exception as e:
         print(f"/now err: {e}", flush=True)
         await reply(f"❌ Не удалось получить статус: {e}")
