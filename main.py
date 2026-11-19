@@ -2,20 +2,22 @@
 ТРЕФИ — Telegram-бот: следит за каналами и воздушными тревогами.
 
 ======================================================================
-ВЕРСИЯ
+ВЕРСИЯ 5.11 (20261119)
 ======================================================================
-Текущая версия — константа VERSION в разделе 3 (её видно в логе при запуске
-и в /help). Как менять номер:
+Номер версии хранится в двух местах: в этой строке и в константе VERSION в
+разделе 3 (её видно в логе при запуске и в /help). Меняйте их вместе.
+Как менять номер:
     * цифры после точки: +1 при каждой правке кода;
     * цифра до точки: только при существенных изменениях;
     * в скобках: дата правки в формате ГГГГММДД.
-В этой версии (5.09): /silent. Расписание не сбрасывается от /silent on|off.
-При заданном расписании on/off действует до ближайшей границы расписания,
-потом снова управляет расписание. Расписание отключается командой /silent 0.
-В версии 5.08: когда режим, зависящий от времени, включается или выключается
-сам (тихий режим по расписанию и второй район по выходным), в общий чат
-приходит короткое сообщение без звука: «Режим silent включен.»,
-«Район 2 выключен.» и т.п.
+В этой версии: в сообщениях о тревогах появились тип угрозы и время из ответа
+alerts.in.ua (киевское, с секундами), например:
+    «🔴 Тривога Фастівський р-н / Червона (балістика) 20:50:07».
+У «Відбій» времени нет. Если сайт не прислал угрозу или время, этой части в
+сообщении просто нет.
+Тревога без цвета (сайт прислал тревогу, а красный или жёлтый не указал)
+больше не считается отбоем: приходит «❓ Тривога … / Невизначена», без звука
+в тихом режиме, как жёлтая.
 
 ======================================================================
 ЧТО ДЕЛАЕТ БОТ
@@ -32,7 +34,8 @@
    Отключить/включить: дописать/убрать «#» в панели Supabase и отправить
    боту /reload. В /list такие слова показываются отдельным блоком 💤.
 2. ТРЕВОГИ. Раз в 12 секунд спрашивает API воздушных тревог (alerts.in.ua)
-   и присылает сообщения о тревогах и отбоях для Киева и Фастівського р-ну.
+   и присылает сообщения о тревогах (с типом угрозы и временем) и об отбоях
+   для Киева и Фастівського р-ну.
 3. ПУЛЬС. В общем чате висит закреплённое сообщение: два значка
    (Київ, Фастівський р-н) и время. Если что-то сломалось, вместо него
    показывается список проблем, например «БД, Telegram».
@@ -159,7 +162,7 @@ def run_flask():
 # 3. ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ И КОНСТАНТЫ
 # ============================================================
 # Версия бота (правила изменения номера: см. «ВЕРСИЯ» в начале файла).
-VERSION = "5.09 (20261118)"
+VERSION = "5.11 (20261119)"
 
 # Переменные окружения задаются на Render (Environment). В коде их менять
 # не нужно.
@@ -490,7 +493,7 @@ ALERTS_FIRST_POLL_DONE = None   # событие «первый опрос вы�
 HEARTBEAT_MESSAGE_ID = None     # ID закреплённого сообщения (None — ещё не создано)
 LAST_PULSE_TEXT = None          # текст, который сейчас показан в пульсе
 HEARTBEAT_LOCK = threading.Lock()   # пульс обновляют два цикла: блокировка исключает дубли
-PULSE_LEVELS = {}               # статус районов в пульсе: {"r31": None|"yellow"|"red", ...}
+PULSE_LEVELS = {}               # статус районов в пульсе: {"r31": None|"yellow"|"red"|"unknown", ...}
 LAST_HEALTH_PROBLEMS = []       # список проблем из последней проверки здоровья
 
 # --- Команды ---
@@ -798,10 +801,17 @@ async def notify(text, silent=False, chat_id=None):
 #   1. Раз в 12 секунд ОДИН запрос к API: он возвращает все активные
 #      тревоги по стране.
 #   2. Из них выбираем наши районы (WATCHED_DISTRICTS) и получаем статус
-#      каждого: None (отбой), "yellow" или "red".
+#      каждого: None (отбой), "yellow", "red" или "unknown" (тревога есть,
+#      а цвет не указан).
 #   3. Сравниваем с прошлым статусом. Сообщение отправляется только если
 #      статус изменился.
-#   4. Районы с одинаковым новым статусом объединяются в одно сообщение.
+#   4. Районы с одинаковым новым статусом (и одинаковыми угрозой и временем)
+#      объединяются в одно сообщение, иначе остаются отдельными.
+#   5. К сообщению о тревоге добавляются угрозы (поле threats) и время:
+#      «🔴 Тривога Київ / Червона (балістика) 20:50:07». Время из ответа сайта
+#      (UTC), переводится в киевское. Новая тревога (была тишина): время начала
+#      тревоги (started_at). Смена цвета: время самой ранней угрозы нового
+#      цвета, а если угроз нет, без времени. «Відбій»: без времени.
 
 def api_requests_last_minute():
     """Сколько запросов к API тревог сделано за последние 60 секунд
@@ -817,14 +827,30 @@ def register_api_request():
     API_REQUEST_TIMES.append(time.time())
 
 
-def compute_current_status(active_alerts):
-    """Определяет статус наших районов по списку тревог из API.
+# Названия угроз (поле threats) для сообщений. Слева название из API,
+# справа текст в сообщении. Если угрозы нет в таблице, выводится как есть.
+THREAT_NAMES = {
+    "tactic_aircraft_activity": "ближня авіація",
+    "strategic_aircraft_activity": "дальня авіація",
+    "mig31k_departure": "МіГ-31К",
+    "ballistic_missiles": "балістика",
+    "cruise_missiles": "крилаті ракети",
+    "unspecified_missiles": "ракети",
+    "drones": "дрони",
+    "guided_aerial_bombs": "КАБи",
+    "air_defense": "ППО",
+    "unknown": "невідомо",
+}
 
-    Возвращает словарь {ключ района: None | "yellow" | "red"} только для
-    районов, которые отслеживаются сейчас (active_districts).
-    Если района в списке нет, значит у него отбой (None)."""
+
+def match_alerts(active_alerts):
+    """Находит тревогу каждого нашего района в списке тревог из API.
+
+    Возвращает {ключ района: тревога} только для районов, которые отслеживаются
+    сейчас (active_districts) и есть в списке. Района нет в словаре: у него отбой.
+    Если у района несколько записей, берётся последняя."""
     districts = active_districts()
-    current = {d["key"]: None for d in districts}
+    found = {}
     for alert in active_alerts:
         uid = int(alert.location_uid) if alert.location_uid else 0
         title = (alert.location_title or "").lower()
@@ -832,15 +858,105 @@ def compute_current_status(active_alerts):
             # Район находим по коду, а если не совпал, то по названию
             # (если запасной поиск задан: пустая строка нашла бы любой район).
             if uid == d["uid"] or (d["title_part"] and d["title_part"] in title):
-                current[d["key"]] = alert.alert_level
+                found[d["key"]] = alert
                 break
-    return current
+    return found
+
+
+def alert_level_of(alert):
+    """Цвет тревоги: "red", "yellow" или "unknown" (тревога есть, а цвет не
+    указан или непонятен). None здесь не бывает: тревога в списке есть, значит
+    это не отбой."""
+    level = str(alert.alert_level or "").lower()
+    return level if level in ("red", "yellow") else "unknown"
+
+
+def compute_current_status(found):
+    """Статус наших районов по результату match_alerts.
+
+    Возвращает словарь {ключ района: None | "yellow" | "red" | "unknown"} только
+    для районов, которые отслеживаются сейчас (active_districts).
+    Если района нет в found, значит у него отбой (None)."""
+    return {
+        d["key"]: (alert_level_of(found[d["key"]]) if d["key"] in found else None)
+        for d in active_districts()
+    }
+
+
+def _field(obj, name):
+    """Поле объекта из ответа API: атрибут (объект библиотеки) или ключ
+    словаря. Если поля нет, возвращает None."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _to_utc(value):
+    """Время из ответа API (строка вида «2026-11-18T12:24:06.926Z» или datetime)
+    в datetime в UTC. Если времени нет или формат непонятен, возвращает None."""
+    try:
+        if not value:
+            return None
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def alert_suffix(alert, level, new_alert):
+    """Хвост сообщения о тревоге: угрозы и время, например « (балістика) 20:50:07».
+
+    alert     — тревога района из API;
+    level     — её цвет ("red", "yellow" или "unknown");
+    new_alert — True, если до этого была тишина (новая тревога).
+    Время: у новой тревоги время начала тревоги (started_at); при смене цвета
+    время самой ранней угрозы нового цвета (если угроз нет, времени нет).
+    Если сайт не прислал угрозу или время, этой части нет. Ошибка разбора угроз
+    или времени не должна останавливать мониторинг: тогда этой части просто нет."""
+    names = []      # названия угроз нужного цвета
+    starts = []     # время начала этих угроз
+    try:
+        for t in _field(alert, "threats") or []:
+            t_level = str(_field(t, "level") or "").lower()
+            if level != "unknown" and t_level and t_level != level:
+                continue            # угроза другого цвета (например, жёлтая при красной тревоге)
+            kind = _field(t, "threat_type")
+            if kind:
+                name = THREAT_NAMES.get(str(kind), str(kind))
+                if name not in names:
+                    names.append(name)
+            started = _to_utc(_field(t, "started_at"))
+            if started:
+                starts.append(started)
+    except Exception as e:
+        # Угрозы не разобрались: сообщение уйдёт без них (время всё равно попробуем).
+        print(f"alert_suffix threats err: {e}", flush=True)
+
+    when = None
+    try:
+        if new_alert:
+            when = _to_utc(_field(alert, "started_at"))
+        elif starts:
+            when = min(starts)
+    except Exception as e:
+        print(f"alert_suffix time err: {e}", flush=True)
+
+    text = ""
+    if names:
+        text += f" ({', '.join(names)})"
+    if when:
+        text += " " + kyiv_from_utc(when).strftime("%H:%M:%S")
+    return text
 
 
 # Подписи статусов для команды /now.
 STATUS_TEXT = {
     "red": "🔴 красная тревога",
     "yellow": "🟡 жёлтая тревога",
+    "unknown": "❓ тревога, цвет не указан",
     None: "🟢 тревоги нет",
 }
 
@@ -856,30 +972,43 @@ def format_status(current):
     return "\n".join(lines)
 
 
-def build_alert_messages(changes):
+def build_alert_messages(changes, found, last_status):
     """Готовит сообщения о смене статуса.
 
-    changes — {ключ района: новый статус} только для изменившихся районов.
-    Возвращает список (текст, без_звука). Районы с одинаковым новым статусом
-    объединяются в одно сообщение («Київ і Фастівський р-н»), разные
-    остаются отдельными сообщениями."""
-    # Группируем названия районов по новому статусу (порядок — как в WATCHED_DISTRICTS).
+    changes     — {ключ района: новый статус} только для изменившихся районов;
+    found       — тревоги районов из API (результат match_alerts);
+    last_status — прошлые статусы (до этого опроса): по ним видно, новая ли это
+                  тревога (была тишина) или просто сменился цвет.
+    Возвращает список (текст, без_звука). Районы с одинаковым новым статусом,
+    угрозами и временем объединяются в одно сообщение («Київ і Фастівський р-н»),
+    остальные идут отдельными сообщениями."""
+    # Группируем названия районов по (новый статус, угрозы и время).
+    # Порядок: как в WATCHED_DISTRICTS.
     groups = {}
     for d in WATCHED_DISTRICTS:
-        if d["key"] in changes:
-            groups.setdefault(changes[d["key"]], []).append(d["name"])
+        key = d["key"]
+        if key not in changes:
+            continue
+        level = changes[key]
+        suffix = ""
+        if level in ("red", "yellow", "unknown") and key in found:
+            suffix = alert_suffix(found[key], level, last_status.get(key) is None)
+        groups.setdefault((level, suffix), []).append(d["name"])
 
     messages = []
-    for level, names in groups.items():
+    for (level, suffix), names in groups.items():
         joined = " і ".join(names)
         if level == "red":
             # Красная тревога всегда со звуком.
-            messages.append((f"🔴 Тривога {joined} / Червоний рівень", False))
+            messages.append((f"🔴 Тривога {joined} / Червона{suffix}", False))
         elif level == "yellow":
             # Жёлтая: без звука в тихом режиме.
-            messages.append((f"🟡 Тривога {joined} / Жовтий рівень", silent_mode()))
+            messages.append((f"🟡 Тривога {joined} / Жовта{suffix}", silent_mode()))
+        elif level == "unknown":
+            # Цвет не указан: без звука в тихом режиме (как жёлтая).
+            messages.append((f"❓ Тривога {joined} / Невизначена{suffix}", silent_mode()))
         elif level is None:
-            # Відбій: без звука в тихом режиме.
+            # Відбій: без времени, без звука в тихом режиме.
             messages.append((f"🟢 Відбій {joined}", silent_mode()))
     return messages
 
@@ -919,11 +1048,12 @@ async def alerts_monitoring_loop():
             # Пустой список — нормальный ответ: тревог по стране нет, значит
             # в наших районах отбой. Ошибки запроса (сеть, токен) выбрасывают
             # исключение (см. except ниже) и статусы не меняют.
-            current = compute_current_status(active_alerts)
+            found = match_alerts(active_alerts)
+            current = compute_current_status(found)
 
             # 1. Сообщения только по тем районам, где статус изменился.
             changes = {k: v for k, v in current.items() if v != last_status[k]}
-            for text, silent in build_alert_messages(changes):
+            for text, silent in build_alert_messages(changes, found, last_status):
                 await notify(text, silent=silent)
 
             # 2. Пульс показывает статус каждого района отдельным значком,
@@ -959,7 +1089,7 @@ async def alerts_monitoring_loop():
 #   есть проблемы:   «БД, Telegram»  (только список, без значков и времени)
 # Сообщение создаётся один раз, закрепляется и дальше только редактируется.
 
-PULSE_EMOJI = {None: "🟢", "yellow": "🟡", "red": "🔴"}
+PULSE_EMOJI = {None: "🟢", "yellow": "🟡", "red": "🔴", "unknown": "❓"}
 
 
 def update_heartbeat(problems=None):
@@ -1516,7 +1646,7 @@ async def cmd_now():
         register_api_request()
         active = list(await ALERTS_CLIENT.get_active_alerts())
         ALERTS_LAST_OK = time.time()
-        await reply(format_status(compute_current_status(active)))
+        await reply(format_status(compute_current_status(match_alerts(active))))
     except Exception as e:
         print(f"/now err: {e}", flush=True)
         await reply(f"❌ Не удалось получить статус: {e}")
